@@ -1,0 +1,30 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+fastapi = "*"
+uvicorn = "*"
+supabase = "*"
+pgvector = "*"
+langchain = "*"
+sentence-transformers = "*"
+opencv-python = "*"
+tensorflow = "*"
+numpy = "*"
+python-multipart = "*"
+psycopg2-binary = "*"
+python-dotenv = "*"
+groq = "*"
+langchain-groq = "*"
+PyPDF2 = "*"
+pytube = "*"
+
+[requires]
+python_version = "3.12"
+
+[dev-packages]
+
+[scripts]
+start = "uvicorn main:app --reload --host 0.0.0.0 --port 8000"

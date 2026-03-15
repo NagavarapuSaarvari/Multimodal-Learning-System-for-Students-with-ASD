@@ -1,0 +1,66 @@
+.App {
+  text-align: center;
+  font-family: "Segoe UI", Arial, sans-serif;
+  padding: 40px;
+  min-height: 100vh;
+  background-color: #f3f8ff;
+}
+
+/* Header Styling */
+.header {
+  background: linear-gradient(90deg, #2563eb, #3b82f6);
+  color: white;
+  padding: 30px;
+  border-radius: 10px;
+  margin-bottom: 30px;
+}
+
+.title {
+  font-size: 32px;
+  margin-bottom: 10px;
+}
+
+.subtitle {
+  font-size: 18px;
+  opacity: 0.9;
+}
+
+/* Buttons */
+button {
+  background-color: #2563eb;
+  color: white;
+  border: none;
+  padding: 10px 18px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 15px;
+  transition: 0.2s ease;
+}
+
+button:hover {
+  background-color: #1d4ed8;
+}
+
+/* Inputs */
+input[type="text"],
+input[type="file"] {
+  padding: 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  font-size: 14px;
+}
+
+input:focus {
+  outline: none;
+  border-color: #2563eb;
+}
+
+/* Cards */
+.card {
+  background: white;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 20px;
+  margin-top: 20px;
+  box-shadow: 0 3px 10px rgba(0,0,0,0.05);
+}
