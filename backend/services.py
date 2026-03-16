@@ -39,9 +39,17 @@ class PDFService:
         try:
             pdf_reader = PdfReader(BytesIO(pdf_bytes))
             text = ""
+
             for page in pdf_reader.pages:
-                text += page.extract_text()
+                page_text = page.extract_text() or ""
+                
+                # REMOVE NULL BYTES
+                page_text = page_text.replace("\x00", "")
+
+                text += page_text
+
             return text
+
         except Exception as e:
             print(f"Error extracting PDF: {e}")
             return ""
@@ -74,7 +82,20 @@ class DocumentService:
 
         # Split text into chunks
         chunks = text.split("\n\n")
-        chunks = [chunk.strip() for chunk in chunks if chunk.strip()]
+        clean_chunks = []
+        for chunk in chunks:
+            chunk = chunk.strip()
+
+            # remove null characters
+            chunk = chunk.replace("\x00", "")
+
+            # remove weird control characters
+            chunk = re.sub(r'[\x00-\x1F\x7F]', ' ', chunk)
+
+            if chunk:
+                clean_chunks.append(chunk)
+
+        chunks = clean_chunks
 
         for chunk in chunks:
             embedding = self.embedder.embed(chunk)
