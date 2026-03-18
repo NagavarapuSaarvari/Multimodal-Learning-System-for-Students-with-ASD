@@ -10,11 +10,13 @@ import traceback
 from io import BytesIO
 
 from sentence_transformers import SentenceTransformer
+from youtubesearchpython import VideosSearch
 from langchain_groq import ChatGroq
 from dotenv import load_dotenv
 from database import db
-from pytube import Search
+
 from PyPDF2 import PdfReader
+from tensorflow.keras.utils import custom_object_scope
 
 load_dotenv()
 
@@ -22,521 +24,775 @@ GROQ_KEY = os.getenv("GROQ_API_KEY")
 logger = logging.getLogger(__name__)
 
 
+# ==============================
+# EMBEDDING SERVICE (Singleton)
+# ==============================
 class EmbeddingService:
 
-    def __init__(self):
-        self.model = SentenceTransformer("all-MiniLM-L6-v2")
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super(EmbeddingService, cls).__new__(cls)
+            cls._instance.model = SentenceTransformer("all-MiniLM-L6-v2")
+        return cls._instance
 
     def embed(self, text):
         return self.model.encode(text).tolist()
 
 
+# ==============================
+# PDF SERVICE
+# ==============================
 class PDFService:
-    
+
     @staticmethod
     def extract_text_from_pdf(pdf_bytes):
-        """Extract text from PDF bytes"""
+
         try:
-            pdf_reader = PdfReader(BytesIO(pdf_bytes))
+            reader = PdfReader(BytesIO(pdf_bytes))
             text = ""
 
-            for page in pdf_reader.pages:
+            for page in reader.pages:
                 page_text = page.extract_text() or ""
-                
-                # REMOVE NULL BYTES
                 page_text = page_text.replace("\x00", "")
-
+                page_text = re.sub(r"[\x00-\x1F\x7F]", " ", page_text)
                 text += page_text
 
-            return text
+            return text.strip()
 
         except Exception as e:
-            print(f"Error extracting PDF: {e}")
+            logger.error(f"PDF extraction error: {e}")
             return ""
 
 
+# ==============================
+# DOCUMENT SERVICE
+# ==============================
 class DocumentService:
 
     def __init__(self):
         self.embedder = EmbeddingService()
 
     def upload_document(self, file_bytes, filename):
-        """Upload PDF document and store embeddings"""
-        
-        # Validate PDF
-        if not filename.lower().endswith('.pdf'):
-            raise ValueError("Only PDF files are allowed")
 
-        # Extract text from PDF
+        if not filename.lower().endswith(".pdf"):
+            raise ValueError("Only PDF files allowed")
+
         text = PDFService.extract_text_from_pdf(file_bytes)
-        
+
         if not text:
-            raise ValueError("Could not extract text from PDF")
+            raise ValueError("Could not extract text")
 
         doc_id = str(uuid.uuid4())
 
         db.execute(
             "INSERT INTO documents (id, filename, file_type, uploaded_at) VALUES (%s,%s,%s,NOW())",
-            (doc_id, filename, 'pdf')
+            (doc_id, filename, "pdf"),
         )
 
-        # Split text into chunks
-        chunks = text.split("\n\n")
-        clean_chunks = []
-        for chunk in chunks:
-            chunk = chunk.strip()
-
-            # remove null characters
-            chunk = chunk.replace("\x00", "")
-
-            # remove weird control characters
-            chunk = re.sub(r'[\x00-\x1F\x7F]', ' ', chunk)
-
-            if chunk:
-                clean_chunks.append(chunk)
-
-        chunks = clean_chunks
+        chunks = [c.strip() for c in text.split("\n\n") if c.strip()]
 
         for chunk in chunks:
+
             embedding = self.embedder.embed(chunk)
+
             db.execute(
                 """
                 INSERT INTO document_chunks
                 (id,document_id,content,embedding)
                 VALUES (%s,%s,%s,%s)
                 """,
-                (
-                    str(uuid.uuid4()),
-                    doc_id,
-                    chunk,
-                    embedding
-                )
+                (str(uuid.uuid4()), doc_id, chunk, embedding),
             )
 
         return doc_id
 
     def get_documents(self):
-        """Get all uploaded documents"""
-        db.execute("SELECT id, filename, uploaded_at FROM documents ORDER BY uploaded_at DESC")
+
+        db.execute(
+            "SELECT id, filename, uploaded_at FROM documents ORDER BY uploaded_at DESC"
+        )
+
         results = db.fetch()
+
         return [
             {
                 "id": r[0],
                 "filename": r[1],
-                "uploaded_at": r[2].isoformat() if r[2] else None
+                "uploaded_at": r[2].isoformat() if r[2] else None,
             }
             for r in results
         ]
 
     def delete_document(self, doc_id):
-        """Delete document and its chunks"""
-        db.execute("DELETE FROM document_chunks WHERE document_id = %s", (doc_id,))
-        db.execute("DELETE FROM documents WHERE id = %s", (doc_id,))
+
+        db.execute("DELETE FROM document_chunks WHERE document_id=%s", (doc_id,))
+        db.execute("DELETE FROM documents WHERE id=%s", (doc_id,))
+
         return True
 
 
+# ==============================
+# YOUTUBE SERVICE
+# ==============================
 class YouTubeService:
-    
+
     @staticmethod
     def search_videos(topic, num_results=3):
-        """Search YouTube for relevant videos"""
         try:
-            search = Search(topic)
-            results = []
-            for video in search.results[:num_results]:
-                results.append({
-                    "title": video.title,
-                    "url": f"https://www.youtube.com/watch?v={video.video_id}",
-                    "channel": video.author,
-                    "length": video.length
-                })
-            return results
+            videos = VideosSearch(topic, limit=num_results).result()
+            return [
+                {
+                    "title": v["title"],
+                    "url": v["link"],
+                    "channel": v["channel"]["name"],
+                }   
+                for v in videos["result"]
+            ]
         except Exception as e:
-            print(f"Error searching YouTube: {e}")
+            logger.error(f"YouTube search error: {e}")
             return []
 
 
+# ==============================
+# RAG SERVICE
+# ==============================
 class RAGService:
 
     def __init__(self):
+
         self.embedder = EmbeddingService()
+
         self.llm = ChatGroq(
             model="llama-3.3-70b-versatile",
-            api_key=GROQ_KEY
+            api_key=GROQ_KEY,
         )
+
         self.youtube_service = YouTubeService()
 
     def retrieve_context(self, topic, limit=5):
+
         embedding = self.embedder.embed(topic)
+
         vector_str = "[" + ",".join(map(str, embedding)) + "]"
 
         db.execute(
             "SELECT content FROM match_documents(%s::vector,%s)",
-            (vector_str, limit)
+            (vector_str, limit),
         )
 
         results = db.fetch()
-        context = "\n".join([r[0] for r in results])
-        return context
+
+        return "\n".join([r[0] for r in results])
 
     def generate_material(self, topic, memory, difficulty="easy"):
-        """Generate comprehensive learning material with YouTube references"""
-        
-        context = self.retrieve_context(topic)
-        
-        memory_text = ""
-        if memory:
-            memory_text = "Past learning:\n"
-            for item in memory:
-                memory_text += f"- {item[0]}: Score {item[1]}\n"
+
+        context = self.retrieve_context(topic, limit=2)[:1500]
 
         prompt = f"""
-You are an expert AI tutor for students with autism spectrum disorder (ASD). 
-Create clear, structured, and sensory-friendly learning material.
+Create learning material for {topic} at {difficulty} level.
 
-Difficulty Level: {difficulty}
+Include: definitions, examples, key points. Keep it concise.
 
-Previous Learning:
-{memory_text}
-
-Available Context:
-{context}
-
-Topic: {topic}
-
-Generate comprehensive study material that:
-1. Uses clear, simple language
-2. Breaks down concepts into small, manageable parts
-3. Includes relevant examples
-4. Uses bullet points and visual hierarchies
-5. Provides definitions for technical terms
-6. Includes summary at the end
-
-Be thorough but organized.
+Context: {context}
 """
 
         response = self.llm.invoke(prompt)
-        
-        # Get YouTube references
-        videos = self.youtube_service.search_videos(topic, num_results=3)
-        
-        video_references = "\n\n---\n\n## Recommended Video Resources\n\n"
+
+        videos = self.youtube_service.search_videos(topic, num_results=2)
+
+        video_section = "\n\n---\n\n## Videos\n\n"
+
         if videos:
-            for i, video in enumerate(videos, 1):
-                video_references += f"{i}. **{video['title']}**\n"
-                video_references += f"   Channel: {video['channel']}\n"
-                video_references += f"   Duration: {video['length']} seconds\n"
-                video_references += f"   Link: {video['url']}\n\n"
-        else:
-            video_references += "No videos found for this topic."
 
-        return response.content + video_references
+            for i, v in enumerate(videos, 1):
+                video_section += f"{i}. {v['title']}\n{v['url']}\n\n"
+
+        return response.content + video_section
 
 
+# ==============================
+# MEMORY SERVICE
+# ==============================
 class MemoryService:
 
     def get_memory(self):
-        """Get learning memory for context"""
-        db.execute("SELECT topic, score FROM learning_memory ORDER BY created_at DESC LIMIT 10")
+
+        db.execute(
+            "SELECT topic,score FROM learning_memory ORDER BY created_at DESC LIMIT 10"
+        )
+
         return db.fetch()
 
     def store_memory(self, topic, score, difficulty="easy"):
-        """Store learning memory"""
+
         db.execute(
-            "INSERT INTO learning_memory(topic, score, difficulty, created_at) VALUES(%s,%s,%s,NOW())",
-            (topic, score, difficulty)
+            """
+            INSERT INTO learning_memory
+            (topic,score,difficulty,created_at)
+            VALUES (%s,%s,%s,NOW())
+            """,
+            (topic, score, difficulty),
         )
 
 
+# ==============================
+# TEST ENGINE
+# ==============================
 class TestEngine:
 
     def __init__(self):
+
         self.llm = ChatGroq(
             model="llama-3.3-70b-versatile",
-            api_key=GROQ_KEY
+            api_key=GROQ_KEY,
         )
+
         self.levels = ["easy", "medium", "hard"]
 
-    def next_difficulty(self, current, accuracy, emotion_score=0.5):
-        """Determine next difficulty based on performance"""
+    def next_difficulty(self, current, accuracy, test_number, avg_emotion=0.0):
+
         idx = self.levels.index(current)
 
-        if accuracy > 0.8 and emotion_score > 0.5:
+        if test_number == 1:
+            return "easy"
+
+        # Low emotion (< 0.3) suggests confused/bored - make easier
+        if avg_emotion < 0.3:
+            idx = max(idx - 1, 0)
+        # High accuracy and emotion - increase difficulty
+        elif accuracy > 0.75 and avg_emotion > 0.6:
             idx = min(idx + 1, 2)
-        elif accuracy < 0.4:
+        # Low accuracy - decrease difficulty
+        elif accuracy < 0.5:
             idx = max(idx - 1, 0)
 
         return self.levels[idx]
 
-    def generate_questions(self, topic, difficulty="easy"):
-        """Generate test questions with explanations"""
+    def generate_short_answer_questions(self, topic, difficulty="easy"):
+        """Generate 2 short answer questions - separate LLM call"""
+        prompt = f"Generate exactly 2 one-sentence short answer questions about {topic} at {difficulty} level.\n\nJSON: {{\"questions\": [{{\"query\": \"text\", \"answer\": \"text\"}}]}}"
+        
+        response = self.llm.invoke(prompt)
+        text = response.content.strip()
+        if text.startswith("```"):
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
         
         try:
-            logger.info(f"Generating {difficulty} questions for topic: {topic}")
-            
-            difficulty_guidelines = {
-                "easy": "Basic understanding, straightforward concepts",
-                "medium": "Intermediate understanding, application of concepts",
-                "hard": "Deep understanding, analysis and synthesis of concepts"
-            }
+            data = json.loads(text)
+            return data.get("questions", [])
+        except:
+            match = re.search(r"\{.*\}", text, re.DOTALL)
+            if match:
+                data = json.loads(match.group())
+                return data.get("questions", [])
+            logger.warning(f"Failed to parse short answer questions for {topic}")
+            return []
 
-            prompt = f"""
-Generate exactly 10 multiple choice questions about "{topic}" with {difficulty} difficulty level.
-
-Difficulty Guidelines: {difficulty_guidelines[difficulty]}
-
-Return ONLY a valid JSON array. No markdown, no explanations outside JSON.
-
-Format:
-[
-  {{
-    "question": "Clear question text",
-    "options": ["Option A", "Option B", "Option C", "Option D"],
-    "correctAnswer": 0,
-    "explanation": "Why this is correct and why others are wrong"
-  }}
-]
-
-Requirements:
-- Exactly 10 questions
-- Each question has 4 options
-- correctAnswer is 0-3 (index of correct option)
-- Clear explanations for learning
-- Valid JSON only
-"""
-
-            logger.debug(f"Calling LLM for question generation...")
-            response = self.llm.invoke(prompt)
-            logger.debug(f"LLM response received, length: {len(response.content)}")
-            
-            # Clean the response to ensure it's valid JSON
-            text = response.content.strip()
-            logger.debug(f"Raw response text (first 200 chars): {text[:200]}")
-            
-            # Remove markdown code blocks if present
-            if text.startswith("```"):
-                logger.debug("Removing markdown code block")
-                text = text.split("```")[1]
-                if text.startswith("json"):
-                    text = text[4:]
-                text = text.strip()
-            
-            # Parse JSON
-            try:
-                logger.debug("Parsing JSON...")
-                questions = json.loads(text)
-                logger.info(f"Successfully generated {len(questions)} questions")
-                return questions
-            except json.JSONDecodeError as e:
-                logger.warning(f"JSON parse error, attempting regex extraction: {str(e)}")
-                # Try to extract JSON from the response
-                json_match = re.search(r'\[.*\]', text, re.DOTALL)
-                if json_match:
-                    logger.debug("Found JSON match with regex")
-                    questions = json.loads(json_match.group())
-                    logger.info(f"Successfully extracted {len(questions)} questions via regex")
-                    return questions
-                else:
-                    error_msg = f"Could not parse test questions. Response: {text[:500]}"
-                    logger.error(error_msg)
-                    raise ValueError(error_msg)
-        except Exception as e:
-            error_msg = f"Error generating questions: {str(e)}\n{traceback.format_exc()}"
-            logger.error(error_msg)
-            raise
-
-    def create_test_session(self, topic, difficulty):
-        """Create a test session and store questions"""
+    def generate_mcq_questions(self, topic, difficulty="easy"):
+        """Generate 5 MCQ questions - separate LLM call"""
+        prompt = f"Generate exactly 5 multiple choice questions about {topic} at {difficulty} level.\n\nJSON: {{\"questions\": [{{\"question\": \"text\", \"options\": [\"A\",\"B\",\"C\",\"D\"], \"answer\": 0, \"explanation\": \"text\"}}]}}"
+        
+        response = self.llm.invoke(prompt)
+        text = response.content.strip()
+        if text.startswith("```"):
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+        
         try:
-            logger.info(f"Creating test session for topic: {topic}, difficulty: {difficulty}")
-            session_id = str(uuid.uuid4())
-            logger.debug(f"Generated session ID: {session_id}")
-            
-            logger.debug("Calling generate_questions...")
-            questions = self.generate_questions(topic, difficulty)
-            logger.debug(f"Generated {len(questions)} questions")
+            data = json.loads(text)
+            return data.get("questions", [])
+        except:
+            match = re.search(r"\{.*\}", text, re.DOTALL)
+            if match:
+                data = json.loads(match.group())
+                return data.get("questions", [])
+            logger.warning(f"Failed to parse MCQ questions for {topic}")
+            return []
 
-            # Store questions in database
-            logger.debug("Storing questions in database...")
-            for idx, q in enumerate(questions):
-                try:
-                    db.execute(
-                        """
-                        INSERT INTO test_questions 
-                        (session_id, topic, difficulty, question, options, correct_answer, explanation)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
-                        """,
-                        (
-                            session_id,
-                            topic,
-                            difficulty,
-                            q.get("question"),
-                            q.get("options"),
-                            q.get("correctAnswer"),
-                            q.get("explanation")
-                        )
-                    )
-                except Exception as e:
-                    logger.error(f"Error storing question {idx}: {str(e)}")
-                    raise
-            
-            logger.info(f"Test session created successfully. Session ID: {session_id}")
-            return {
-                "sessionId": session_id,
-                "topic": topic,
-                "difficulty": difficulty,
-                "questions": questions
-            }
-        except Exception as e:
-            error_msg = f"Error creating test session: {str(e)}\n{traceback.format_exc()}"
-            logger.error(error_msg)
-            raise
+    def create_test_session(self, topic, difficulty, test_number=1):
+
         session_id = str(uuid.uuid4())
-        questions = self.generate_questions(topic, difficulty)
 
-        # Store questions in database
-        for idx, q in enumerate(questions):
-            db.execute(
-                """
-                INSERT INTO test_questions 
-                (session_id, topic, difficulty, question, options, correct_answer, explanation)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    session_id,
-                    topic,
-                    difficulty,
-                    q.get("question"),
-                    q.get("options"),
-                    q.get("correctAnswer"),
-                    q.get("explanation")
+        db.execute(
+            """
+            INSERT INTO test_sessions
+            (id,topic,test_number,initial_difficulty,current_difficulty)
+            VALUES (%s,%s,%s,%s,%s)
+            """,
+            (session_id, topic, test_number, difficulty, difficulty),
+        )
+
+        logger.info(f"Generating batch 1 questions - topic: {topic}, difficulty: {difficulty}")
+
+        # Generate batch 1: 2 short answer + 5 MCQ = 7 questions (separate LLM calls)
+        sa_questions = self.generate_short_answer_questions(topic, difficulty)
+        mcq_questions = self.generate_mcq_questions(topic, difficulty)
+
+        # Store short answer questions (batch 1)
+        for sa_q in sa_questions[:2]:
+            try:
+                db.execute(
+                    """
+                    INSERT INTO test_questions
+                    (session_id,topic,difficulty,question,options,correct_answer,explanation,batch_number)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    (
+                        session_id,
+                        topic,
+                        difficulty,
+                        sa_q.get("query") or sa_q.get("question"),
+                        [sa_q.get("answer") or sa_q.get("sampleAnswer", "")],
+                        0,
+                        sa_q.get("answer") or sa_q.get("sampleAnswer", ""),
+                        1,
+                    ),
                 )
-            )
+            except Exception as e:
+                logger.error(f"Error storing short answer: {e}")
+
+        # Store MCQ questions (batch 1)
+        for q in mcq_questions[:5]:
+            try:
+                db.execute(
+                    """
+                    INSERT INTO test_questions
+                    (session_id,topic,difficulty,question,options,correct_answer,explanation,batch_number)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    (
+                        session_id,
+                        topic,
+                        difficulty,
+                        q.get("question"),
+                        q.get("options", ["A","B","C","D"]),
+                        q.get("answer") or q.get("correctAnswer", 0),
+                        q.get("explanation", ""),
+                        1,
+                    ),
+                )
+            except Exception as e:
+                logger.error(f"Error storing MCQ: {e}")
+
+        # Fetch batch 1 questions
+        db.execute(
+            """
+            SELECT id, question, options, correct_answer, explanation FROM test_questions
+            WHERE session_id = %s AND batch_number = 1
+            ORDER BY id ASC
+            """,
+            (session_id,),
+        )
+        question_rows = db.fetch()
+        
+        questions = []
+        for qrow in question_rows:
+            questions.append({
+                "id": qrow[0],
+                "question": qrow[1],
+                "options": qrow[2],
+                "correctAnswer": qrow[3],
+                "explanation": qrow[4],
+            })
+
+        logger.info(f"Batch 1 created with {len(questions)} questions for session {session_id}")
 
         return {
             "sessionId": session_id,
             "topic": topic,
             "difficulty": difficulty,
-            "questions": questions
+            "testNumber": test_number,
+            "totalQuestions": len(questions),
+            "questions": questions,
+            "batchNumber": 1,
         }
 
     def submit_answer(self, test_session_id, question_index, user_answer):
-        """Submit and validate an answer by question index within session"""
-        
+        """Submit an answer for a question"""
         try:
-            logger.debug(f"Looking up question - Session: {test_session_id}, Index: {question_index}")
-            
-            # Get the question by index within the session (1-indexed in DB)
-            db.execute(
-                """SELECT id, correct_answer, explanation FROM test_questions 
-                   WHERE session_id = %s 
-                   ORDER BY id ASC
-                   LIMIT 1 OFFSET %s""",
-                (test_session_id, question_index - 1)  # Convert to 0-indexed for OFFSET
-            )
-            result = db.fetch()
-            
-            if not result:
-                error_msg = f"Question not found - Session: {test_session_id}, Index: {question_index}"
-                logger.error(error_msg)
-                raise ValueError(error_msg)
-
-            question_id = result[0][0]
-            correct_answer = result[0][1]
-            explanation = result[0][2]
-            is_correct = (user_answer == correct_answer)
-            
-            logger.debug(f"Question found - ID: {question_id}, Correct Answer: {correct_answer}, User Answer: {user_answer}, Is Correct: {is_correct}")
-
-            # Store the answer
+            # Get question at given index
             db.execute(
                 """
-                INSERT INTO user_test_answers 
+                SELECT id, correct_answer FROM test_questions 
+                WHERE session_id = %s
+                ORDER BY id ASC
+                OFFSET %s LIMIT 1
+                """,
+                (test_session_id, question_index),
+            )
+            result = db.fetch()
+            if not result:
+                raise ValueError(f"Question not found at index {question_index}")
+            
+            question_id, correct_answer = result[0]
+            is_correct = user_answer == correct_answer
+            
+            # Store user's answer
+            db.execute(
+                """
+                INSERT INTO user_test_answers
                 (test_session_id, question_id, user_answer, is_correct)
                 VALUES (%s, %s, %s, %s)
                 """,
-                (test_session_id, question_id, user_answer, is_correct)
+                (test_session_id, question_id, user_answer, is_correct),
             )
             
-            logger.info(f"Answer stored - Session: {test_session_id}, Question: {question_id}, Correct: {is_correct}")
-
             return {
                 "isCorrect": is_correct,
                 "correctAnswer": correct_answer,
-                "explanation": explanation
+                "userAnswer": user_answer
             }
         except Exception as e:
-            error_msg = f"Error submitting answer: {str(e)}\n{traceback.format_exc()}"
-            logger.error(error_msg)
+            logger.error(f"Error submitting answer: {e}")
             raise
 
-    def calculate_score(self, test_session_id):
-        """Calculate test score and return results"""
+    def calculate_score(self, test_session_id, avg_emotion=0.0):
+        """Calculate final score for a test session"""
+        try:
+            # Get test session
+            db.execute(
+                "SELECT topic, initial_difficulty, test_number FROM test_sessions WHERE id = %s",
+                (test_session_id,),
+            )
+            session = db.fetch()
+            if not session:
+                raise ValueError("Test session not found")
+            
+            topic, difficulty, test_number = session[0]
+            
+            # Count correct answers
+            db.execute(
+                """
+                SELECT COUNT(*) as total, SUM(CASE WHEN is_correct THEN 1 ELSE 0 END) as correct
+                FROM user_test_answers
+                WHERE test_session_id = %s
+                """,
+                (test_session_id,),
+            )
+            stats = db.fetch()[0]
+            total_questions = stats[0] or 10
+            correct_answers = stats[1] or 0
+            
+            accuracy = correct_answers / total_questions if total_questions > 0 else 0
+            score = int(accuracy * 100)
+            
+            # Determine next difficulty for next test (including emotion factor)
+            next_difficulty = self.next_difficulty(difficulty, accuracy, test_number, avg_emotion)
+            
+            # Store results
+            db.execute(
+                """
+                INSERT INTO test_results
+                (session_id, topic, score, total_questions, difficulty, avg_emotion, test_number)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (test_session_id, topic, score, total_questions, difficulty, str(avg_emotion), test_number),
+            )
+            
+            # Update test session status
+            db.execute(
+                "UPDATE test_sessions SET status = 'completed', completed_at = NOW() WHERE id = %s",
+                (test_session_id,),
+            )
+            
+            return {
+                "sessionId": test_session_id,
+                "topic": topic,
+                "score": score,
+                "accuracy": accuracy,
+                "difficulty": difficulty,
+                "nextDifficulty": next_difficulty,
+                "totalQuestions": total_questions,
+                "correctAnswers": correct_answers,
+                "avgEmotion": avg_emotion,
+                "testNumber": test_number,
+            }
+        except Exception as e:
+            logger.error(f"Error calculating score: {e}")
+            raise
+
+    def get_test_count(self, topic):
+        """Get number of completed tests for a topic"""
+        try:
+            db.execute(
+                """
+                SELECT COUNT(*) FROM test_results
+                WHERE topic = %s
+                """,
+                (topic,),
+            )
+            result = db.fetch()
+            return result[0][0] if result else 0
+        except Exception as e:
+            logger.warning(f"Error getting test count: {e}")
+            return 0
+
+    def get_last_test_result(self, topic):
+        """Get the last test result for a topic to determine next difficulty"""
+        try:
+            db.execute(
+                """
+                SELECT score, accuracy, difficulty, next_difficulty, test_number
+                FROM (
+                    SELECT 
+                        score, 
+                        CAST(score AS FLOAT) / 100.0 as accuracy,
+                        difficulty,
+                        CASE 
+                            WHEN CAST(score AS FLOAT) / 100.0 > 0.75 THEN 'hard'
+                            WHEN CAST(score AS FLOAT) / 100.0 < 0.5 THEN 'easy'
+                            ELSE difficulty
+                        END as next_difficulty,
+                        test_number
+                    FROM test_results
+                    WHERE topic = %s
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                ) as last_test
+                """,
+                (topic,),
+            )
+            result = db.fetch()
+            if result:
+                score, accuracy, difficulty, next_difficulty, test_number = result[0]
+                return {
+                    "score": score,
+                    "accuracy": accuracy,
+                    "difficulty": next_difficulty,
+                    "testNumber": test_number,
+                }
+            return None
+        except Exception as e:
+            logger.warning(f"Error getting last test result: {e}")
+            return None
+
+    def generate_next_batch(self, session_id, topic, current_difficulty):
+        """
+        Generate batch 2 (second set of questions) with adaptive difficulty.
         
-        db.execute(
-            """
-            SELECT COUNT(*), SUM(CASE WHEN is_correct THEN 1 ELSE 0 END), 
-                   topic, difficulty
-            FROM user_test_answers uta
-            JOIN test_questions tq ON uta.question_id = tq.id
-            WHERE uta.test_session_id = %s
-            GROUP BY uta.test_session_id, tq.topic, tq.difficulty
-            """,
-            (test_session_id,)
-        )
-        
-        result = db.fetch()
-        if not result:
-            raise ValueError("Test session not found")
+        Difficulty logic:
+        - High accuracy (>75%) AND positive emotion (>0.6) → increase difficulty
+        - Low accuracy (<50%) → decrease difficulty
+        - Low emotion (<0.3) → decrease difficulty
+        - Otherwise → keep same difficulty
+        """
+        try:
+            # Get batch 1 performance
+            db.execute(
+                """
+                SELECT COUNT(*), SUM(CASE WHEN is_correct THEN 1 ELSE 0 END)
+                FROM user_test_answers
+                WHERE test_session_id = %s
+                """,
+                (session_id,),
+            )
+            result = db.fetch()[0]
+            total = result[0] or 1
+            correct = result[1] or 0
+            accuracy = correct / total if total > 0 else 0
+            
+            logger.info(f"Batch 1 Performance - Accuracy: {accuracy:.2f}")
+            
+            # Get average emotion from batch 1
+            emotion_service = EmotionService()
+            avg_emotion = emotion_service.get_average_emotion(session_id)
+            logger.info(f"Average Emotion for batch 1: {avg_emotion:.2f}")
+            
+            # Determine batch 2 difficulty based on performance + emotion
+            new_difficulty = self.next_difficulty(current_difficulty, accuracy, test_number=2, avg_emotion=avg_emotion)
+            logger.info(f"Batch 2 difficulty: {current_difficulty} → {new_difficulty} (accuracy: {accuracy:.2f}, emotion: {avg_emotion:.2f})")
+            
+            # Generate batch 2 questions with new difficulty
+            logger.info(f"Generating batch 2 questions - topic: {topic}, difficulty: {new_difficulty}")
+            sa_questions = self.generate_short_answer_questions(topic, new_difficulty)
+            mcq_questions = self.generate_mcq_questions(topic, new_difficulty)
+            
+            # Store short answer questions (batch 2)
+            for sa_q in sa_questions[:2]:
+                try:
+                    db.execute(
+                        """
+                        INSERT INTO test_questions
+                        (session_id,topic,difficulty,question,options,correct_answer,explanation,batch_number)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                        """,
+                        (
+                            session_id,
+                            topic,
+                            new_difficulty,
+                            sa_q.get("query") or sa_q.get("question"),
+                            [sa_q.get("answer") or sa_q.get("sampleAnswer", "")],
+                            0,
+                            sa_q.get("answer") or sa_q.get("sampleAnswer", ""),
+                            2,
+                        ),
+                    )
+                except Exception as e:
+                    logger.error(f"Error storing batch 2 short answer: {e}")
+            
+            # Store MCQ questions (batch 2)
+            for q in mcq_questions[:5]:
+                try:
+                    db.execute(
+                        """
+                        INSERT INTO test_questions
+                        (session_id,topic,difficulty,question,options,correct_answer,explanation,batch_number)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                        """,
+                        (
+                            session_id,
+                            topic,
+                            new_difficulty,
+                            q.get("question"),
+                            q.get("options", ["A","B","C","D"]),
+                            q.get("answer") or q.get("correctAnswer", 0),
+                            q.get("explanation", ""),
+                            2,
+                        ),
+                    )
+                except Exception as e:
+                    logger.error(f"Error storing batch 2 MCQ: {e}")
+            
+            # Fetch batch 2 questions
+            db.execute(
+                """
+                SELECT id, question, options, correct_answer, explanation FROM test_questions
+                WHERE session_id = %s AND batch_number = 2
+                ORDER BY id ASC
+                """,
+                (session_id,),
+            )
+            question_rows = db.fetch()
+            
+            questions = []
+            for qrow in question_rows:
+                questions.append({
+                    "id": qrow[0],
+                    "question": qrow[1],
+                    "options": qrow[2],
+                    "correctAnswer": qrow[3],
+                    "explanation": qrow[4],
+                })
+            
+            logger.info(f"Batch 2 created with {len(questions)} questions for session {session_id}")
+            
+            return {
+                "sessionId": session_id,
+                "topic": topic,
+                "difficulty": new_difficulty,
+                "totalQuestions": len(questions),
+                "questions": questions,
+                "batchNumber": 2,
+                "batch1Performance": {
+                    "accuracy": accuracy,
+                    "avgEmotion": avg_emotion,
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"Error generating next batch: {e}")
+            raise
 
-        total_questions = result[0][0]
-        correct_answers = result[0][1]
-        topic = result[0][2]
-        difficulty = result[0][3]
 
-        score = int((correct_answers / total_questions) * 100) if total_questions > 0 else 0
-        accuracy = correct_answers / total_questions if total_questions > 0 else 0
-
-        # Store test result
-        db.execute(
-            """
-            INSERT INTO test_results 
-            (topic, score, total_questions, difficulty, created_at)
-            VALUES (%s, %s, %s, %s, NOW())
-            """,
-            (topic, score, total_questions, difficulty)
-        )
-
-        return {
-            "score": score,
-            "accuracy": accuracy,
-            "correctAnswers": correct_answers,
-            "totalQuestions": total_questions,
-            "topic": topic,
-            "difficulty": difficulty
-        }
-
-
+# ==============================
+# EMOTION SERVICE
+# ==============================
 class EmotionService:
 
     def __init__(self):
+
         try:
-            self.model = tf.keras.models.load_model("image_model.h5")
-            self.labels = ["confused", "focused", "bored", "happy"]
-        except:
+
+            with custom_object_scope({'TFOpLambda': tf.keras.layers.Lambda}):
+                self.model = tf.keras.models.load_model("image_model.h5",compile=False)
+                self.labels = ["confused", "focused", "bored", "happy"]
+
+        except Exception as e:
+
+            logger.warning(f"Emotion model load failed: {e}")
+
             self.model = None
             self.labels = []
 
     def predict(self, image):
-        """Predict emotion from image"""
+
         if self.model is None:
-            return "focused"
+            return {"emotion": "focused", "confidence": 0.0}
 
         try:
+
             img = cv2.resize(image, (96, 96))
             img = img / 255.0
             img = np.expand_dims(img, 0)
-            pred = self.model.predict(img)
-            return self.labels[np.argmax(pred)]
-        except:
-            return "focused"
+
+            pred = self.model.predict(img, verbose=0)
+
+            idx = np.argmax(pred)
+
+            return {
+                "emotion": self.labels[idx],
+                "confidence": float(np.max(pred)),
+            }
+
+        except Exception as e:
+
+            logger.warning(f"Emotion prediction error {e}")
+
+            return {"emotion": "focused", "confidence": 0.0}
+
+    def store_emotion(self, test_session_id, emotion, confidence=0.0):
+        """Store emotion for test session"""
+        try:
+            db.execute(
+                """
+                INSERT INTO test_emotions (session_id, emotion, confidence)
+                VALUES (%s, %s, %s)
+                """,
+                (test_session_id, emotion, confidence),
+            )
+            logger.debug(f"Emotion stored: {test_session_id} - {emotion} ({confidence:.2f})")
+        except Exception as e:
+            logger.warning(f"Error storing emotion: {e}")
+
+    def get_average_emotion(self, test_session_id):
+        """Get average emotion confidence for test session"""
+        try:
+            db.execute(
+                """
+                SELECT AVG(confidence) as avg_confidence
+                FROM test_emotions
+                WHERE session_id = %s
+                """,
+                (test_session_id,),
+            )
+            result = db.fetch()
+            if result and result[0][0]:
+                return float(result[0][0])
+            return 0.0
+        except Exception as e:
+            logger.warning(f"Error getting average emotion: {e}")
+            return 0.0
+
+    def extract_emotion_from_text(self, text):
+        """
+        Extract emotion from textual answer (placeholder for future NLP implementation)
+        
+        TODO: Implement sentiment analysis on student's text answers
+        - Analyze answer length (short/verbose)
+        - Check for frustration keywords
+        - Detect confidence in response
+        - Return emotion score 0.0-1.0
+        
+        For now, returns neutral emotion score
+        """
+        # Placeholder implementation
+        return {
+            "emotion": "neutral",
+            "confidence": 0.5,
+            "details": "Text analysis not yet implemented"
+        }

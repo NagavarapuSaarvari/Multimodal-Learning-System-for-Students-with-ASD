@@ -3,11 +3,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import traceback
 import logging
+import base64
+import io
+import cv2
+import numpy as np
+from PIL import Image
 from services import (
     DocumentService,
     RAGService,
     MemoryService,
-    TestEngine
+    TestEngine,
+    EmotionService
 )
 
 # Configure logging
@@ -31,6 +37,7 @@ doc_service = DocumentService()
 rag_service = RAGService()
 memory_service = MemoryService()
 test_engine = TestEngine()
+emotion_service = EmotionService()
 
 
 @app.post("/upload")
@@ -95,11 +102,19 @@ def learn(topic: str, difficulty: str = "easy"):
 
 
 @app.post("/test/create")
-def create_test(topic: str, difficulty: str = "easy"):
+def create_test(topic: str, difficulty: str = "easy", test_number: int = 1):
     """Create a new test session"""
     try:
-        logger.info(f"Creating test for topic: {topic}, difficulty: {difficulty}")
-        test_data = test_engine.create_test_session(topic, difficulty)
+        logger.info(f"Creating test for topic: {topic}, test #{test_number}")
+        
+        # If not first test, determine difficulty from previous results
+        if test_number > 1:
+            last_result = test_engine.get_last_test_result(topic)
+            if last_result and test_number <= 3:
+                difficulty = last_result["difficulty"]
+                logger.info(f"Using previous difficulty: {difficulty}")
+        
+        test_data = test_engine.create_test_session(topic, difficulty, test_number)
         logger.info(f"Test created successfully. Session ID: {test_data.get('sessionId')}")
         return test_data
     except Exception as e:
@@ -127,21 +142,114 @@ def get_test_score(test_session_id: str):
     """Get final test score and results"""
     try:
         logger.info(f"Calculating score for session: {test_session_id}")
-        results = test_engine.calculate_score(test_session_id)
-        # Determine next difficulty
-        next_difficulty = test_engine.next_difficulty(
-            results["difficulty"],
-            results["accuracy"]
-        )
-        results["nextDifficulty"] = next_difficulty
+        
+        # Get average emotion from test session
+        avg_emotion = emotion_service.get_average_emotion(test_session_id)
+        
+        results = test_engine.calculate_score(test_session_id, avg_emotion)
         
         # Store in memory
         memory_service.store_memory(results["topic"], results["score"], results["difficulty"])
-        logger.info(f"Score calculated - Accuracy: {results['accuracy']*100:.1f}%, Next Difficulty: {next_difficulty}")
+        logger.info(f"Score calculated - Accuracy: {results['accuracy']*100:.1f}%, Emotion: {avg_emotion}")
         
         return results
     except Exception as e:
         error_msg = f"Error calculating score: {str(e)}\n{traceback.format_exc()}"
+        logger.error(error_msg)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/test/emotion")
+def store_emotion(test_session_id: str, emotion: str, confidence: float = 0.0):
+    """Store emotion detected during test"""
+    try:
+        logger.debug(f"Storing emotion for session: {test_session_id}, emotion: {emotion}, confidence: {confidence}")
+        emotion_service.store_emotion(test_session_id, emotion, confidence)
+        return {"status": "stored"}
+    except Exception as e:
+        error_msg = f"Error storing emotion: {str(e)}\n{traceback.format_exc()}"
+        logger.error(error_msg)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/test/emotion/detect")
+def detect_emotion_from_image(data: dict):
+    """Detect emotion from webcam image during test"""
+    try:
+        test_session_id = data.get("test_session_id")
+        image_data = data.get("image_data")
+        
+        logger.debug(f"Detecting emotion from image for session: {test_session_id}")
+        
+        if not image_data or not test_session_id:
+            raise ValueError("Missing test_session_id or image_data")
+        
+        # Decode base64 image
+        image_bytes = base64.b64decode(image_data.split(",")[1])
+        
+        # Convert to image for cv2 processing
+        img = Image.open(io.BytesIO(image_bytes))
+        image = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+        
+        # Predict emotion
+        result = emotion_service.predict(image)
+        emotion = result["emotion"]
+        confidence = result["confidence"]
+        
+        # Store in database
+        emotion_service.store_emotion(test_session_id, emotion, confidence)
+        
+        logger.debug(f"Emotion detected: {emotion} ({confidence:.2f}) for session {test_session_id}")
+        
+        return {
+            "status": "detected",
+            "emotion": emotion,
+            "confidence": float(confidence)
+        }
+    except Exception as e:
+        error_msg = f"Error detecting emotion: {str(e)}\n{traceback.format_exc()}"
+        logger.error(error_msg)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/test/batch/next")
+def get_next_batch(session_id: str, topic: str, current_difficulty: str = "easy"):
+    """Get the next batch of questions (batch 2) with adaptive difficulty"""
+    try:
+        logger.info(f"Generating batch 2 for session: {session_id}")
+        
+        batch_data = test_engine.generate_next_batch(session_id, topic, current_difficulty)
+        
+        logger.info(f"Batch 2 generated successfully. Difficulty: {batch_data['difficulty']}")
+        return batch_data
+    except Exception as e:
+        error_msg = f"Error generating next batch: {str(e)}\n{traceback.format_exc()}"
+        logger.error(error_msg)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/test/next-info")
+def get_next_test_info(topic: str):
+    """Get information about next test"""
+    try:
+        logger.info(f"Getting next test info for topic: {topic}")
+        test_count = test_engine.get_test_count(topic)
+        test_number = test_count + 1
+        
+        if test_number > 3:
+            return {
+                "testNumber": test_number,
+                "testCompleted": True,
+                "message": "All 3 tests are completed"
+            }
+        
+        return {
+            "testNumber": test_number,
+            "testCompleted": False,
+            "message": f"Ready for test {test_number} of 3"
+        }
+    except Exception as e:
+        error_msg = f"Error getting next test info: {str(e)}\n{traceback.format_exc()}"
         logger.error(error_msg)
         raise HTTPException(status_code=500, detail=str(e))
 

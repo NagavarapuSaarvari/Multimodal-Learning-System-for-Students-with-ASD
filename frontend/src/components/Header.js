@@ -1,34 +1,22 @@
 import React from "react"
-import { GraduationCap } from "lucide-react"
 
 const Header = () => {
-
   return (
-
-    <header className="w-full bg-gradient-to-r from-blue-600 to-blue-500 shadow-lg">
-
-      <div className="max-w-6xl mx-auto px-6 py-8 flex flex-col items-center text-center text-white">
-
-        <div className="flex items-center gap-3 mb-2">
-
-          <GraduationCap size={34} />
-
-          <h1 className="text-3xl md:text-4xl font-bold tracking-tight">
-            AI Learning System
-          </h1>
-
+    <header className="w-full bg-gradient-to-r from-blue-600 via-blue-700 to-indigo-800 shadow-xl">
+      <div className="max-w-7xl mx-auto px-6 py-10">
+        <div className="flex flex-col items-center justify-center text-center">
+          <div>
+            <h1 className="text-4xl md:text-5xl font-bold tracking-tight text-white">
+              Multimodal Learning System
+            </h1>
+            <p className="text-blue-100 text-lg mt-2">
+              Personalized AI-Powered Learning for Students with ASD
+            </p>
+          </div>
         </div>
-
-        <p className="text-blue-100 text-lg md:text-xl">
-          Personalized AI Tutor for Students
-        </p>
-
       </div>
-
     </header>
-
   )
-
 }
 
 export default Header

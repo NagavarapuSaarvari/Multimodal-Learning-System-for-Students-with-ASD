@@ -110,3 +110,86 @@ export const getTestScore = async (testSessionId) => {
   
   return await response.json();
 };
+
+export const createTestWithNumber = async (topic, difficulty = "easy", testNumber = 1) => {
+  try {
+    const response = await fetch(
+      `${API_BASE}/test/create?topic=${encodeURIComponent(topic)}&difficulty=${difficulty}&test_number=${testNumber}`,
+      {
+        method: "POST",
+      }
+    );
+    
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ detail: "Unknown error" }));
+      throw new Error(errorData.detail || `Failed to create test: ${response.status}`);
+    }
+    
+    return await response.json();
+  } catch (error) {
+    console.error("createTestWithNumber error:", error);
+    throw error;
+  }
+};
+
+export const storeEmotion = async (sessionId, imageDataOrEmotion, confidence = 0.0) => {
+  try {
+    // Check if it's image data (base64 string starting with 'data:') or emotion text
+    if (typeof imageDataOrEmotion === 'string' && imageDataOrEmotion.startsWith('data:')) {
+      // Send image for emotion detection
+      const response = await fetch(
+        `${API_BASE}/test/emotion/detect`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            test_session_id: sessionId,
+            image_data: imageDataOrEmotion
+          })
+        }
+      );
+      
+      if (!response.ok) {
+        console.warn("Failed to detect emotion from image");
+      }
+      
+      return await response.json();
+    } else {
+      // Store emotion manually (fallback)
+      const response = await fetch(
+        `${API_BASE}/test/emotion?test_session_id=${sessionId}&emotion=${imageDataOrEmotion}&confidence=${confidence}`,
+        {
+          method: "POST",
+        }
+      );
+      
+      if (!response.ok) {
+        console.warn("Failed to store emotion");
+      }
+      
+      return await response.json();
+    }
+  } catch (error) {
+    console.warn("storeEmotion error:", error);
+    // Don't throw - emotion tracking is non-critical
+  }
+};
+
+export const getNextTestInfo = async (topic) => {
+  try {
+    const response = await fetch(
+      `${API_BASE}/test/next-info?topic=${encodeURIComponent(topic)}`
+    );
+    
+    if (!response.ok) {
+      throw new Error("Failed to get next test info");
+    }
+    
+    return await response.json();
+  } catch (error) {
+    console.error("getNextTestInfo error:", error);
+    throw error;
+  }
+};

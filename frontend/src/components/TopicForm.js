@@ -4,14 +4,13 @@ import { BookOpen } from "lucide-react"
 function TopicForm({ onSubmit, loading = false }) {
 
   const [topic, setTopic] = useState("")
-  const [difficulty, setDifficulty] = useState("easy")
 
   const handleSubmit = (e) => {
     e.preventDefault()
 
     if (!topic.trim()) return
 
-    onSubmit(topic, difficulty)
+    onSubmit(topic)
   }
 
   return (
@@ -46,22 +45,6 @@ function TopicForm({ onSubmit, loading = false }) {
             >
               {loading ? "Generating..." : "Generate"}
             </button>
-          </div>
-
-          <div className="flex items-center gap-3">
-            <label className="text-sm font-medium text-gray-700">
-              Difficulty Level:
-            </label>
-            <select
-              value={difficulty}
-              onChange={(e) => setDifficulty(e.target.value)}
-              disabled={loading}
-              className="px-3 py-2 border border-blue-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-400 disabled:bg-gray-100 text-sm"
-            >
-              <option value="easy">Easy (Basics)</option>
-              <option value="medium">Medium (Intermediate)</option>
-              <option value="hard">Hard (Advanced)</option>
-            </select>
           </div>
 
         </form>

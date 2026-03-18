@@ -328,7 +328,7 @@ User can take multiple revision tests
 
 ### External Services
 1. **Groq API** (LLM)
-   - Model: `llama-3.3-70b-versatile`
+   - Model: `openai/gpt-oss-120b`
    - Used for: Material generation, question generation
    - Cost: Pay-per-token
 

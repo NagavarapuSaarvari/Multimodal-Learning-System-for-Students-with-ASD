@@ -10,6 +10,13 @@ function ResultCard({ material }) {
   const parts = material.split("---")
   const mainMaterial = parts[0]
   const videoSection = parts.length > 1 ? parts.slice(1).join("---") : null
+  const formatLinks = (text) => {
+  const urlRegex = /(https?:\/\/[^\s]+)/g
+
+  return text.replace(urlRegex, (url) => {
+    return `[Watch Video](${url})`
+  })
+}
 
   return (
 
@@ -73,7 +80,7 @@ function ResultCard({ material }) {
                 ),
               }}
             >
-              {videoSection}
+              {formatLinks(videoSection)}
             </ReactMarkdown>
           </div>
 

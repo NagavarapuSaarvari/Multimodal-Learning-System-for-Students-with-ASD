@@ -40,13 +40,28 @@ class DatabaseSetup:
         """)
 
         db.execute("""
+        CREATE TABLE IF NOT EXISTS test_sessions(
+            id UUID PRIMARY KEY,
+            topic TEXT,
+            test_number INT DEFAULT 1,
+            initial_difficulty TEXT DEFAULT 'easy',
+            current_difficulty TEXT DEFAULT 'easy',
+            status TEXT DEFAULT 'in_progress',
+            created_at TIMESTAMP DEFAULT NOW(),
+            completed_at TIMESTAMP
+        );
+        """)
+
+        db.execute("""
         CREATE TABLE IF NOT EXISTS test_results(
             id SERIAL PRIMARY KEY,
+            session_id UUID REFERENCES test_sessions(id),
             topic TEXT,
             score INT,
             total_questions INT,
             difficulty TEXT,
             avg_emotion TEXT,
+            test_number INT DEFAULT 1,
             created_at TIMESTAMP DEFAULT NOW()
         );
         """)
@@ -54,13 +69,14 @@ class DatabaseSetup:
         db.execute("""
         CREATE TABLE IF NOT EXISTS test_questions(
             id SERIAL PRIMARY KEY,
-            session_id UUID,
+            session_id UUID REFERENCES test_sessions(id),
             topic TEXT,
             difficulty TEXT,
             question TEXT,
             options TEXT[],
             correct_answer INT,
             explanation TEXT,
+            batch_number INT DEFAULT 1,
             created_at TIMESTAMP DEFAULT NOW()
         );
         """)
@@ -68,11 +84,21 @@ class DatabaseSetup:
         db.execute("""
         CREATE TABLE IF NOT EXISTS user_test_answers(
             id SERIAL PRIMARY KEY,
-            test_session_id UUID,
+            test_session_id UUID REFERENCES test_sessions(id),
             question_id INT REFERENCES test_questions(id),
             user_answer INT,
             is_correct BOOLEAN,
             created_at TIMESTAMP DEFAULT NOW()
+        );
+        """)
+
+        db.execute("""
+        CREATE TABLE IF NOT EXISTS test_emotions(
+            id SERIAL PRIMARY KEY,
+            session_id UUID REFERENCES test_sessions(id),
+            emotion TEXT,
+            confidence FLOAT,
+            captured_at TIMESTAMP DEFAULT NOW()
         );
         """)
 
