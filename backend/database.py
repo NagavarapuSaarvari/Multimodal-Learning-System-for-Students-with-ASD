@@ -27,9 +27,12 @@ class Database:
 
     def execute(self, query, values=None):
 
-        self.cursor.execute(query, values)
-
-        self.connection.commit()
+        try:
+            self.cursor.execute(query, values)
+            self.connection.commit()
+        except Exception as e:
+            self.connection.rollback()
+            raise e
 
     def fetch(self):
 

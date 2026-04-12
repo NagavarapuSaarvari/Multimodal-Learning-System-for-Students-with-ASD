@@ -259,3 +259,94 @@ def health():
     """Health check endpoint"""
     logger.info("Health check")
     return {"status": "ok"}
+
+
+@app.post("/upload-youtube")
+async def upload_youtube(youtube_url: str):
+    """Upload a YouTube video transcript as learning material"""
+    try:
+        logger.info(f"Uploading YouTube: {youtube_url}")
+        result = doc_service.upload_youtube(youtube_url)
+        logger.info(f"YouTube uploaded successfully: {result['doc_id']}")
+        return result
+    except ValueError as e:
+        logger.error(f"Validation error in YouTube upload: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        error_msg = f"YouTube upload failed: {str(e)}\n{traceback.format_exc()}"
+        logger.error(error_msg)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/test/emotion/text")
+def analyze_text_emotion(test_session_id: str, answer_text: str):
+    """Analyze emotion from student's text answer"""
+    try:
+        logger.debug(f"Analyzing text emotion for session: {test_session_id}")
+        
+        if not answer_text or len(answer_text.strip()) < 3:
+            return {
+                "emotion": "neutral",
+                "confidence": 0.0,
+                "score": 0.5
+            }
+        
+        result = emotion_service.analyze_answer_emotion(answer_text)
+        
+        # Store text emotion in database
+        emotion_service.store_emotion(
+            test_session_id, 
+            result.get("emotion", "neutral"),
+            result.get("confidence", 0.0),
+            emotion_type="text"
+        )
+        
+        logger.debug(f"Text emotion analyzed: {result['emotion']} ({result['confidence']:.2f})")
+        return result
+    except Exception as e:
+        error_msg = f"Error analyzing text emotion: {str(e)}\n{traceback.format_exc()}"
+        logger.error(error_msg)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/test/emotion/stats")
+def get_emotion_statistics(test_session_id: str):
+    """Get emotion statistics for a test session"""
+    try:
+        logger.debug(f"Getting emotion stats for session: {test_session_id}")
+        stats = emotion_service.get_emotion_stats(test_session_id)
+        return {
+            "sessionId": test_session_id,
+            "statistics": stats,
+            "avgImage": emotion_service.get_average_emotion(test_session_id, "image"),
+            "avgText": emotion_service.get_average_emotion(test_session_id, "text"),
+            "avgAll": emotion_service.get_average_emotion(test_session_id, "all")
+        }
+    except Exception as e:
+        error_msg = f"Error getting emotion stats: {str(e)}\n{traceback.format_exc()}"
+        logger.error(error_msg)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/test/evaluate-text-answer")
+def evaluate_text_answer(test_session_id: str, question_index: int, topic: str, question: str, answer: str):
+    """Evaluate student's open-ended text answer using LLM"""
+    try:
+        logger.info(f"Evaluating text answer for session: {test_session_id}, question index: {question_index}")
+        
+        # Use TestEngine to evaluate the answer
+        evaluation = test_engine.evaluate_text_answer(topic, question, answer)
+        
+        logger.info(f"Text answer evaluated - Correct: {evaluation['is_correct']}, Score: {evaluation['score']}")
+        
+        return {
+            "status": "evaluated",
+            "isCorrect": evaluation["is_correct"],
+            "feedback": evaluation["feedback"],
+            "score": evaluation["score"],
+            "questionIndex": question_index
+        }
+    except Exception as e:
+        error_msg = f"Error evaluating text answer: {str(e)}\n{traceback.format_exc()}"
+        logger.error(error_msg)
+        raise HTTPException(status_code=500, detail=str(e))

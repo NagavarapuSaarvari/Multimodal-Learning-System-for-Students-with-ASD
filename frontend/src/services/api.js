@@ -40,6 +40,22 @@ export const deleteDocument = async (docId) => {
   return await response.json();
 };
 
+export const uploadYouTube = async (youtubeUrl) => {
+  const response = await fetch(
+    `${API_BASE}/upload-youtube?youtube_url=${encodeURIComponent(youtubeUrl)}`,
+    {
+      method: "POST",
+    }
+  );
+  
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || "YouTube upload failed");
+  }
+  
+  return await response.json();
+};
+
 // Learning Material
 export const generateLearningMaterial = async (topic, difficulty = "easy") => {
   const response = await fetch(
@@ -100,15 +116,21 @@ export const submitAnswer = async (testSessionId, questionIndex, userAnswer) => 
 };
 
 export const getTestScore = async (testSessionId) => {
-  const response = await fetch(
-    `${API_BASE}/test/score?test_session_id=${testSessionId}`
-  );
-  
-  if (!response.ok) {
-    throw new Error("Failed to get test score");
+  try {
+    const response = await fetch(
+      `${API_BASE}/test/score?test_session_id=${testSessionId}`
+    );
+    
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ detail: "Unknown error" }));
+      throw new Error(errorData.detail || `Server error: ${response.status}`);
+    }
+    
+    return await response.json();
+  } catch (error) {
+    console.error("getTestScore error:", error);
+    throw error;
   }
-  
-  return await response.json();
 };
 
 export const createTestWithNumber = async (topic, difficulty = "easy", testNumber = 1) => {
@@ -190,6 +212,87 @@ export const getNextTestInfo = async (topic) => {
     return await response.json();
   } catch (error) {
     console.error("getNextTestInfo error:", error);
+    throw error;
+  }
+};
+
+// Emotion Analysis (Multimodal)
+export const analyzeTextEmotion = async (testSessionId, answerText) => {
+  try {
+    const response = await fetch(
+      `${API_BASE}/test/emotion/text?test_session_id=${testSessionId}&answer_text=${encodeURIComponent(answerText)}`,
+      {
+        method: "POST",
+      }
+    );
+    
+    if (!response.ok) {
+      console.warn("Failed to analyze text emotion");
+      return null;
+    }
+    
+    return await response.json();
+  } catch (error) {
+    console.warn("analyzeTextEmotion error:", error);
+    // Don't throw - emotion tracking is non-critical
+    return null;
+  }
+};
+
+export const getEmotionStats = async (testSessionId) => {
+  try {
+    const response = await fetch(
+      `${API_BASE}/test/emotion/stats?test_session_id=${testSessionId}`
+    );
+    
+    if (!response.ok) {
+      console.warn("Failed to get emotion stats");
+      return null;
+    }
+    
+    return await response.json();
+  } catch (error) {
+    console.warn("getEmotionStats error:", error);
+    return null;
+  }
+};
+
+// Text Answer Evaluation
+export const evaluateTextAnswer = async (testSessionId, questionIndex, topic, question, answer) => {
+  try {
+    const response = await fetch(
+      `${API_BASE}/test/evaluate-text-answer?test_session_id=${testSessionId}&question_index=${questionIndex}&topic=${encodeURIComponent(topic)}&question=${encodeURIComponent(question)}&answer=${encodeURIComponent(answer)}`,
+      {
+        method: "POST",
+      }
+    );
+    
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ detail: "Unknown error" }));
+      throw new Error(errorData.detail || "Failed to evaluate answer");
+    }
+    
+    return await response.json();
+  } catch (error) {
+    console.error("evaluateTextAnswer error:", error);
+    throw error;
+  }
+};
+
+export const submitTextAnswer = async (testSessionId, questionIndex, answerText) => {
+  try {
+    // First analyze emotion from the text
+    await analyzeTextEmotion(testSessionId, answerText);
+    
+    // Then return the answer for later evaluation
+    return {
+      status: "submitted",
+      questionIndex,
+      answer: answerText,
+      timestamp: Date.now()
+    };
+  } catch (error) {
+    console.error("submitTextAnswer error:", error);
     throw error;
   }
 };

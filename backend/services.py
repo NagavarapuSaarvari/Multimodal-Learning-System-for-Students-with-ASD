@@ -8,6 +8,7 @@ import re
 import logging
 import traceback
 from io import BytesIO
+from urllib.parse import urlparse, parse_qs
 
 from sentence_transformers import SentenceTransformer
 from youtubesearchpython import VideosSearch
@@ -17,6 +18,16 @@ from database import db
 
 from PyPDF2 import PdfReader
 from tensorflow.keras.utils import custom_object_scope
+
+try:
+    from transformers import pipeline
+except ImportError:
+    pass
+
+try:
+    from youtube_transcript_api import YouTubeTranscriptApi
+except ImportError:
+    pass
 
 load_dotenv()
 
@@ -132,6 +143,202 @@ class DocumentService:
 
         return True
 
+    def upload_youtube(self, youtube_url):
+        """Upload YouTube transcript as a document"""
+        try:
+            # Extract video ID
+            video_id = YouTubeTranscriptService.extract_video_id(youtube_url)
+            if not video_id:
+                raise ValueError(f"Invalid YouTube URL: {youtube_url}")
+
+            # Get transcript
+            transcript_text = YouTubeTranscriptService.get_transcript(video_id)
+            if not transcript_text:
+                raise ValueError(f"Could not extract transcript from video: {video_id}")
+
+            # Create document
+            doc_id = str(uuid.uuid4())
+            video_info = YouTubeTranscriptService.get_video_info(video_id)
+            
+            db.execute(
+                """
+                INSERT INTO documents (id, filename, file_type, source_url, uploaded_at) 
+                VALUES (%s, %s, %s, %s, NOW())
+                """,
+                (doc_id, f"YouTube: {video_id}", "youtube", youtube_url),
+            )
+
+            # Chunk and embed transcript
+            chunks = [c.strip() for c in transcript_text.split("\n\n") if c.strip() and len(c.strip()) > 50]
+            
+            if not chunks:
+                # If no good chunks, split by sentences
+                import re
+                sentences = re.split(r'[.!?]+', transcript_text)
+                chunks = [s.strip() for s in sentences if len(s.strip()) > 20]
+
+            for chunk in chunks[:100]:  # Limit chunks per video
+                embedding = self.embedder.embed(chunk)
+
+                db.execute(
+                    """
+                    INSERT INTO document_chunks
+                    (id, document_id, content, embedding)
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    (str(uuid.uuid4()), doc_id, chunk, embedding),
+                )
+
+            logger.info(f"YouTube transcript uploaded: {doc_id} - {len(chunks)} chunks")
+            return {
+                "doc_id": doc_id,
+                "video_id": video_id,
+                "url": youtube_url,
+                "chunks": len(chunks)
+            }
+
+        except Exception as e:
+            logger.error(f"Error uploading YouTube: {str(e)}")
+            raise ValueError(f"YouTube upload failed: {str(e)}")
+
+
+# ==============================
+# TEXT EMOTION SERVICE (Singleton)
+# ==============================
+class TextEmotionService:
+    """
+    Use HuggingFace transformers for text emotion/sentiment analysis
+    Models: distilbert-base-uncased-finetuned-sst-2-english, 
+            cardiffnlp/twitter-roberta-base-emotion
+    """
+
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super(TextEmotionService, cls).__new__(cls)
+            try:
+                # Use lightweight model for faster inference
+                cls._instance.classifier = pipeline(
+                    "sentiment-analysis",
+                    model="distilbert-base-uncased-finetuned-sst-2-english",
+                    device=-1  # CPU, use 0 for GPU
+                )
+                cls._instance.available = True
+                logger.info("TextEmotionService initialized successfully")
+            except Exception as e:
+                logger.warning(f"TextEmotionService initialization failed: {e}")
+                cls._instance.available = False
+                cls._instance.classifier = None
+        return cls._instance
+
+    def analyze_text(self, text):
+        """Analyze emotion/sentiment from text"""
+        if not self.available or not text.strip():
+            return {
+                "emotion": "neutral",
+                "confidence": 0.0,
+                "label": "NEUTRAL",
+                "score": 0.5
+            }
+
+        try:
+            # Truncate to avoid token limit
+            text = text[:512]
+            result = self.classifier(text)[0]
+            
+            # Map sentiment to emotion score
+            label = result['label']  # POSITIVE or NEGATIVE
+            score = result['score']  # 0.0 -> 1.0
+            
+            # Convert to emotion metric
+            if label == 'POSITIVE':
+                confidence = score  # 0.5 -> 1.0
+                emotion = "positive"
+            else:
+                confidence = score  # 0.5 -> 1.0
+                emotion = "negative"
+            
+            return {
+                "emotion": emotion,
+                "confidence": confidence,
+                "label": label,
+                "score": score,
+                "text_sample": text[:100]
+            }
+        except Exception as e:
+            logger.warning(f"Text emotion analysis error: {e}")
+            return {
+                "emotion": "neutral",
+                "confidence": 0.0,
+                "label": "ERROR",
+                "score": 0.5
+            }
+
+
+# ==============================
+# YOUTUBE TRANSCRIPT SERVICE
+# ==============================
+class YouTubeTranscriptService:
+    """Extract transcripts/captions from YouTube videos"""
+
+    @staticmethod
+    def extract_video_id(youtube_url):
+        """Extract video ID from various YouTube URL formats"""
+        try:
+            # Handle youtu.be links
+            if 'youtu.be' in youtube_url:
+                return youtube_url.split('youtu.be/')[-1].split('?')[0]
+            
+            # Handle youtube.com links
+            parsed_url = urlparse(youtube_url)
+            if parsed_url.hostname and 'youtube' in parsed_url.hostname:
+                query_params = parse_qs(parsed_url.query)
+                if 'v' in query_params:
+                    return query_params['v'][0]
+                return parsed_url.path.split('/')[-1]
+            
+            # Assume it's already a video ID
+            return youtube_url if len(youtube_url) == 11 else None
+        except Exception as e:
+            logger.error(f"Error extracting video ID from {youtube_url}: {e}")
+            return None
+
+    @staticmethod
+    def get_transcript(video_id):
+        """Get transcript for a YouTube video"""
+        try:
+            try:
+                transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
+                text = " ".join([t['text'] for t in transcript_list])
+                return text
+            except:
+                # Try with auto-generated captions
+                transcript_list = YouTubeTranscriptApi.get_transcript(
+                    video_id, 
+                    languages=['en']
+                )
+                text = " ".join([t['text'] for t in transcript_list])
+                return text
+        except Exception as e:
+            logger.warning(f"Could not fetch transcript for {video_id}: {e}")
+            return None
+
+    @staticmethod
+    def get_video_info(video_id):
+        """Get basic video info"""
+        try:
+            # Note: This would require youtube-dl or similar library
+            # For now, return basic structure
+            return {
+                "video_id": video_id,
+                "url": f"https://www.youtube.com/watch?v={video_id}",
+                "source": "youtube"
+            }
+        except Exception as e:
+            logger.error(f"Error getting video info: {e}")
+            return None
+
 
 # ==============================
 # YOUTUBE SERVICE
@@ -172,44 +379,131 @@ class RAGService:
         self.youtube_service = YouTubeService()
 
     def retrieve_context(self, topic, limit=5):
+        """
+        Enhanced context retrieval with better coverage
+        Uses multiple queries and combines results
+        """
+        try:
+            results = []
+            
+            # Primary query: exact topic
+            embedding = self.embedder.embed(topic)
+            vector_str = "[" + ",".join(map(str, embedding)) + "]"
+            
+            db.execute(
+                "SELECT content FROM match_documents(%s::vector,%s)",
+                (vector_str, limit),
+            )
+            
+            primary_results = db.fetch()
+            for r in primary_results:
+                if r[0] not in [item[0] for item in results]:
+                    results.append(r)
+            
+            # Secondary query: related concepts (if not enough results)
+            if len(results) < limit:
+                # Generate related search terms
+                related_terms = self._generate_related_terms(topic)
+                for term in related_terms[:2]:
+                    embedding = self.embedder.embed(term)
+                    vector_str = "[" + ",".join(map(str, embedding)) + "]"
+                    
+                    db.execute(
+                        "SELECT content FROM match_documents(%s::vector,%s)",
+                        (vector_str, limit // 2),
+                    )
+                    
+                    secondary_results = db.fetch()
+                    for r in secondary_results:
+                        if r[0] not in [item[0] for item in results]:
+                            results.append(r)
+                            if len(results) >= limit:
+                                break
+                    if len(results) >= limit:
+                        break
+            
+            context = "\n\n---\n\n".join([r[0] for r in results[:limit]])
+            logger.info(f"Retrieved {len(results[:limit])} context chunks for '{topic}'")
+            return context
+            
+        except Exception as e:
+            logger.warning(f"Error in enhanced context retrieval: {e}")
+            # Fallback to simple retrieval
+            embedding = self.embedder.embed(topic)
+            vector_str = "[" + ",".join(map(str, embedding)) + "]"
+            db.execute(
+                "SELECT content FROM match_documents(%s::vector,%s)",
+                (vector_str, limit),
+            )
+            results = db.fetch()
+            return "\n".join([r[0] for r in results])
 
-        embedding = self.embedder.embed(topic)
-
-        vector_str = "[" + ",".join(map(str, embedding)) + "]"
-
-        db.execute(
-            "SELECT content FROM match_documents(%s::vector,%s)",
-            (vector_str, limit),
-        )
-
-        results = db.fetch()
-
-        return "\n".join([r[0] for r in results])
+    def _generate_related_terms(self, topic):
+        """Generate related search terms using LLM"""
+        try:
+            prompt = f"Generate 3 related keywords or concepts for '{topic}'. Return as comma-separated list."
+            response = self.llm.invoke(prompt)
+            terms = [t.strip() for t in response.content.split(',')]
+            return terms[:3]
+        except:
+            return []
 
     def generate_material(self, topic, memory, difficulty="easy"):
+        """
+        Generate comprehensive learning material with better structure
+        Includes: concepts, examples, key points, study tips
+        """
+        # Retrieve better context
+        context = self.retrieve_context(topic, limit=5)
+        if len(context) > 2000:
+            context = context[:2000]
 
-        context = self.retrieve_context(topic, limit=2)[:1500]
+        # Structure the prompt for better output
+        prompt = f"""Create comprehensive learning material for the topic: '{topic}' at {difficulty} level.
 
-        prompt = f"""
-Create learning material for {topic} at {difficulty} level.
+Structure the material as follows:
+1. **Core Concepts**: Define the main concepts and explain them simply
+2. **Key Points**: List 3-5 essential points to remember  
+3. **Examples**: Provide 2-3 real-world examples
+4. **Common Mistakes**: Highlight 2-3 common misconceptions
+5. **Study Tips**: Give tips specific to learning this topic effectively
 
-Include: definitions, examples, key points. Keep it concise.
+Difficulty Level: {difficulty}
+- Easy: Use simple language, basic concepts, relatable examples
+- Medium: Mix basic and advanced concepts, real-world applications
+- Hard: Complex explanations, advanced concepts, detailed analysis
 
-Context: {context}
-"""
+Keep the response clear, well-structured, and suitable for students with autism. Use:
+- Clear language without jargon
+- Step-by-step explanations
+- Visual descriptions where helpful
+- Logical flow and organization
 
-        response = self.llm.invoke(prompt)
+Retrieved Reference Material:
+{context}
 
-        videos = self.youtube_service.search_videos(topic, num_results=2)
+Generate the learning material now:"""
 
-        video_section = "\n\n---\n\n## Videos\n\n"
+        try:
+            response = self.llm.invoke(prompt)
+            material = response.content
+        except Exception as e:
+            logger.error(f"Error generating material: {e}")
+            material = f"Error generating material for {topic}. Please try again."
+
+        # Add recommended YouTube videos
+        videos = self.youtube_service.search_videos(topic, num_results=3)
+
+        video_section = "\n\n---\n\n## Recommended Videos\n\n"
 
         if videos:
-
             for i, v in enumerate(videos, 1):
-                video_section += f"{i}. {v['title']}\n{v['url']}\n\n"
+                video_section += f"{i}. **{v['title']}** (Channel: {v['channel']})\n   Link: {v['url']}\n\n"
+        else:
+            video_section += "No videos found for this topic.\n"
 
-        return response.content + video_section
+        logger.info(f"Generated learning material for '{topic}' at {difficulty} level")
+        return material + video_section
 
 
 # ==============================
@@ -251,28 +545,86 @@ class TestEngine:
 
         self.levels = ["easy", "medium", "hard"]
 
-    def next_difficulty(self, current, accuracy, test_number, avg_emotion=0.0):
-
+    def next_difficulty(self, current, accuracy, test_number, avg_emotion=0.0, avg_text_emotion=0.0):
+        """
+        Adaptive difficulty adjustment based on:
+        - Current difficulty level
+        - Test performance (accuracy)
+        - Emotional state (image-based)
+        - Text analysis emotion (from answers)
+        - Test progression (1, 2, or 3)
+        
+        Logic:
+        - Test 1: Always start at 'easy'
+        - If distressed (emotion < 0.3 or negative text) → decrease difficulty
+        - If confident & doing well → increase difficulty
+        - Balance: maintain difficulty if moderate performance
+        """
         idx = self.levels.index(current)
 
+        # Test 1 is always easy
         if test_number == 1:
             return "easy"
 
-        # Low emotion (< 0.3) suggests confused/bored - make easier
-        if avg_emotion < 0.3:
+        # Determine emotional state
+        # Image emotion: 0.0 = low engagement, 1.0 = high focused/happy
+        # Text emotion: 0.0 = negative, 1.0 = positive
+        combined_emotion = (avg_emotion + avg_text_emotion) / 2 if avg_text_emotion > 0 else avg_emotion
+        
+        logger.info(f"Difficulty adjustment: accuracy={accuracy:.2f}, "
+                   f"img_emotion={avg_emotion:.2f}, text_emotion={avg_text_emotion:.2f}, "
+                   f"combined={combined_emotion:.2f}")
+
+        # Decision logic (ordered by priority)
+        
+        # 1. DISTRESSED STATE: Low emotion + low accuracy
+        if avg_emotion < 0.3 and accuracy < 0.6:
+            logger.info("Student appears distressed - decreasing difficulty")
             idx = max(idx - 1, 0)
-        # High accuracy and emotion - increase difficulty
-        elif accuracy > 0.75 and avg_emotion > 0.6:
+        
+        # 2. CONFUSED STATE: Low emotion (confusion) even with decent accuracy
+        elif avg_emotion < 0.35 and accuracy < 0.7:
+            logger.info("Student appears confused - decreasing difficulty")
+            idx = max(idx - 1, 0)
+        
+        # 3. FRUSTRATION: Negative text emotion (from answers) + low score
+        elif avg_text_emotion > 0 and avg_text_emotion < 0.3 and accuracy < 0.6:
+            logger.info("Student appears frustrated (text analysis) - decreasing difficulty")
+            idx = max(idx - 1, 0)
+        
+        # 4. OPTIMAL PERFORMANCE: High accuracy + good emotion
+        elif accuracy > 0.8 and combined_emotion > 0.65:
+            logger.info("Optimal performance - increasing difficulty")
             idx = min(idx + 1, 2)
-        # Low accuracy - decrease difficulty
+        
+        # 5. GOOD PERFORMANCE: Good accuracy + neutral/positive emotion
+        elif accuracy > 0.7 and combined_emotion > 0.5:
+            logger.info("Good performance - considering difficulty increase")
+            if idx < 2:  # Not already at max
+                idx = min(idx + 1, 2)
+        
+        # 6. LOW ACCURACY: Below 50% performance
         elif accuracy < 0.5:
+            logger.info("Low accuracy - decreasing difficulty")
             idx = max(idx - 1, 0)
+        
+        # 7. MODERATE ACCURACY: 50-70% with okay emotion
+        elif accuracy >= 0.5 and accuracy <= 0.7:
+            if combined_emotion < 0.4:
+                logger.info("Moderate accuracy with low engagement - decreasing difficulty")
+                idx = max(idx - 1, 0)
+            else:
+                logger.info("Moderate accuracy with good engagement - maintaining difficulty")
+                # Keep same difficulty
+                pass
+        
+        next_level = self.levels[idx]
+        logger.info(f"Difficulty change: {current} → {next_level} (test #{test_number})")
+        return next_level
 
-        return self.levels[idx]
-
-    def generate_short_answer_questions(self, topic, difficulty="easy"):
-        """Generate 2 short answer questions - separate LLM call"""
-        prompt = f"Generate exactly 2 one-sentence short answer questions about {topic} at {difficulty} level.\n\nJSON: {{\"questions\": [{{\"query\": \"text\", \"answer\": \"text\"}}]}}"
+    def generate_text_answer_questions(self, topic, difficulty="easy"):
+        """Generate 5 open-ended text questions (answers not predefined) - separate LLM call"""
+        prompt = f"Generate exactly 5 open-ended questions about {topic} at {difficulty} level. These are for student essay/text responses. Don't provide expected answers.\n\nJSON: {{\"questions\": [{{\"question\": \"text\"}}]}}"
         
         response = self.llm.invoke(prompt)
         text = response.content.strip()
@@ -289,12 +641,12 @@ class TestEngine:
             if match:
                 data = json.loads(match.group())
                 return data.get("questions", [])
-            logger.warning(f"Failed to parse short answer questions for {topic}")
+            logger.warning(f"Failed to parse text answer questions for {topic}")
             return []
 
-    def generate_mcq_questions(self, topic, difficulty="easy"):
-        """Generate 5 MCQ questions - separate LLM call"""
-        prompt = f"Generate exactly 5 multiple choice questions about {topic} at {difficulty} level.\n\nJSON: {{\"questions\": [{{\"question\": \"text\", \"options\": [\"A\",\"B\",\"C\",\"D\"], \"answer\": 0, \"explanation\": \"text\"}}]}}"
+    def generate_mcq_questions(self, topic, difficulty="easy", num_questions=15):
+        """Generate MCQ questions with configurable count (default 15)"""
+        prompt = f"Generate exactly {num_questions} multiple choice questions about {topic} at {difficulty} level.\n\nJSON: {{\"questions\": [{{\"question\": \"text\", \"options\": [\"A\",\"B\",\"C\",\"D\"], \"answer\": 0, \"explanation\": \"text\"}}]}}"
         
         response = self.llm.invoke(prompt)
         text = response.content.strip()
@@ -329,41 +681,63 @@ class TestEngine:
 
         logger.info(f"Generating batch 1 questions - topic: {topic}, difficulty: {difficulty}")
 
-        # Generate batch 1: 2 short answer + 5 MCQ = 7 questions (separate LLM calls)
-        sa_questions = self.generate_short_answer_questions(topic, difficulty)
-        mcq_questions = self.generate_mcq_questions(topic, difficulty)
+        # Generate batch 1: 5 text answer + 15 MCQ = 20 questions (separate LLM calls)
+        text_questions = self.generate_text_answer_questions(topic, difficulty)
+        mcq_questions = self.generate_mcq_questions(topic, difficulty, num_questions=15)
 
-        # Store short answer questions (batch 1)
-        for sa_q in sa_questions[:2]:
+        # Store text answer questions (batch 1) - no predefined answers
+        for text_q in text_questions[:5]:
             try:
                 db.execute(
                     """
                     INSERT INTO test_questions
-                    (session_id,topic,difficulty,question,options,correct_answer,explanation,batch_number)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                    (session_id,topic,difficulty,question,options,correct_answer,explanation,batch_number,question_type)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     """,
                     (
                         session_id,
                         topic,
                         difficulty,
-                        sa_q.get("query") or sa_q.get("question"),
-                        [sa_q.get("answer") or sa_q.get("sampleAnswer", "")],
-                        0,
-                        sa_q.get("answer") or sa_q.get("sampleAnswer", ""),
-                        1,
+                        text_q.get("query") or text_q.get("question"),
+                        None,  # No predefined options for text questions
+                        None,  # No predefined correct answer for text questions
+                        None,  # No predefined explanation
+                        1,  # batch_number
+                        'text',  # question_type
                     ),
                 )
             except Exception as e:
-                logger.error(f"Error storing short answer: {e}")
+                # Fallback: try without question_type column if it doesn't exist
+                logger.warning(f"Insert with question_type failed: {e}. Trying fallback...")
+                try:
+                    db.execute(
+                        """
+                        INSERT INTO test_questions
+                        (session_id,topic,difficulty,question,options,correct_answer,explanation,batch_number)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                        """,
+                        (
+                            session_id,
+                            topic,
+                            difficulty,
+                            text_q.get("query") or text_q.get("question"),
+                            None,
+                            None,
+                            None,
+                            1,
+                        ),
+                    )
+                except Exception as fallback_error:
+                    logger.error(f"Error storing text answer (both attempts failed): {fallback_error}")
 
-        # Store MCQ questions (batch 1)
-        for q in mcq_questions[:5]:
+        # Store MCQ questions (batch 1) - 15 MCQs
+        for q in mcq_questions[:15]:
             try:
                 db.execute(
                     """
                     INSERT INTO test_questions
-                    (session_id,topic,difficulty,question,options,correct_answer,explanation,batch_number)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                    (session_id,topic,difficulty,question,options,correct_answer,explanation,batch_number,question_type)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     """,
                     (
                         session_id,
@@ -373,11 +747,33 @@ class TestEngine:
                         q.get("options", ["A","B","C","D"]),
                         q.get("answer") or q.get("correctAnswer", 0),
                         q.get("explanation", ""),
-                        1,
+                        1,  # batch_number
+                        'mcq',  # question_type
                     ),
                 )
             except Exception as e:
-                logger.error(f"Error storing MCQ: {e}")
+                # Fallback: try without question_type column if it doesn't exist
+                logger.warning(f"Insert with question_type failed: {e}. Trying fallback...")
+                try:
+                    db.execute(
+                        """
+                        INSERT INTO test_questions
+                        (session_id,topic,difficulty,question,options,correct_answer,explanation,batch_number)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                        """,
+                        (
+                            session_id,
+                            topic,
+                            difficulty,
+                            q.get("question"),
+                            q.get("options", ["A","B","C","D"]),
+                            q.get("answer") or q.get("correctAnswer", 0),
+                            q.get("explanation", ""),
+                            1,
+                        ),
+                    )
+                except Exception as fallback_error:
+                    logger.error(f"Error storing MCQ (both attempts failed): {fallback_error}")
 
         # Fetch batch 1 questions
         db.execute(
@@ -452,7 +848,7 @@ class TestEngine:
             raise
 
     def calculate_score(self, test_session_id, avg_emotion=0.0):
-        """Calculate final score for a test session"""
+        """Calculate final score for a test session with multimodal emotion analysis"""
         try:
             # Get test session
             db.execute(
@@ -481,18 +877,56 @@ class TestEngine:
             accuracy = correct_answers / total_questions if total_questions > 0 else 0
             score = int(accuracy * 100)
             
-            # Determine next difficulty for next test (including emotion factor)
-            next_difficulty = self.next_difficulty(difficulty, accuracy, test_number, avg_emotion)
+            # Get emotion statistics from multimodal analysis
+            emotion_service = EmotionService()
+            emotion_stats = emotion_service.get_emotion_stats(test_session_id)
             
-            # Store results
-            db.execute(
-                """
-                INSERT INTO test_results
-                (session_id, topic, score, total_questions, difficulty, avg_emotion, test_number)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                """,
-                (test_session_id, topic, score, total_questions, difficulty, str(avg_emotion), test_number),
+            # Extract averages
+            avg_image_emotion = emotion_stats.get("image", {}).get("average", 0.0)
+            avg_text_emotion = emotion_stats.get("text", {}).get("average", 0.0)
+            avg_combined_emotion = (avg_image_emotion + avg_text_emotion) / 2 if avg_text_emotion > 0 else avg_image_emotion
+            
+            logger.info(
+                f"Emotion Summary for {test_session_id}: "
+                f"image={avg_image_emotion:.2f}, text={avg_text_emotion:.2f}, combined={avg_combined_emotion:.2f}"
             )
+            
+            # Determine next difficulty for next test (including combined emotion)
+            next_difficulty = self.next_difficulty(
+                difficulty, 
+                accuracy, 
+                test_number, 
+                avg_emotion=avg_image_emotion,
+                avg_text_emotion=avg_text_emotion
+            )
+            
+            # Store results with comprehensive emotion data
+            try:
+                db.execute(
+                    """
+                    INSERT INTO test_results
+                    (session_id, topic, score, total_questions, difficulty, avg_emotion, avg_text_emotion, test_number)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (test_session_id, topic, score, total_questions, difficulty, 
+                     avg_image_emotion, avg_text_emotion, test_number),
+                )
+            except Exception as insert_error:
+                # Fallback: try inserting without avg_text_emotion column (for older schema)
+                logger.warning(f"Insert with avg_text_emotion failed: {insert_error}. Trying fallback...")
+                try:
+                    db.execute(
+                        """
+                        INSERT INTO test_results
+                        (session_id, topic, score, total_questions, difficulty, avg_emotion, test_number)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (test_session_id, topic, score, total_questions, difficulty, 
+                         avg_image_emotion, test_number),
+                    )
+                except Exception as fallback_error:
+                    logger.error(f"Both insert attempts failed: {fallback_error}")
+                    raise fallback_error
             
             # Update test session status
             db.execute(
@@ -509,7 +943,12 @@ class TestEngine:
                 "nextDifficulty": next_difficulty,
                 "totalQuestions": total_questions,
                 "correctAnswers": correct_answers,
-                "avgEmotion": avg_emotion,
+                "emotionAnalysis": {
+                    "avgImageEmotion": avg_image_emotion,
+                    "avgTextEmotion": avg_text_emotion,
+                    "avgCombined": avg_combined_emotion,
+                    "statistics": emotion_stats
+                },
                 "testNumber": test_number,
             }
         except Exception as e:
@@ -574,12 +1013,7 @@ class TestEngine:
     def generate_next_batch(self, session_id, topic, current_difficulty):
         """
         Generate batch 2 (second set of questions) with adaptive difficulty.
-        
-        Difficulty logic:
-        - High accuracy (>75%) AND positive emotion (>0.6) → increase difficulty
-        - Low accuracy (<50%) → decrease difficulty
-        - Low emotion (<0.3) → decrease difficulty
-        - Otherwise → keep same difficulty
+        Uses multimodal emotion analysis (image + text) for better adaptation.
         """
         try:
             # Get batch 1 performance
@@ -598,51 +1032,84 @@ class TestEngine:
             
             logger.info(f"Batch 1 Performance - Accuracy: {accuracy:.2f}")
             
-            # Get average emotion from batch 1
+            # Get multimodal emotion analysis  
             emotion_service = EmotionService()
-            avg_emotion = emotion_service.get_average_emotion(session_id)
-            logger.info(f"Average Emotion for batch 1: {avg_emotion:.2f}")
+            emotion_stats = emotion_service.get_emotion_stats(session_id)
+            avg_image_emotion = emotion_stats.get("image", {}).get("average", 0.0)
+            avg_text_emotion = emotion_stats.get("text", {}).get("average", 0.0)
             
-            # Determine batch 2 difficulty based on performance + emotion
-            new_difficulty = self.next_difficulty(current_difficulty, accuracy, test_number=2, avg_emotion=avg_emotion)
-            logger.info(f"Batch 2 difficulty: {current_difficulty} → {new_difficulty} (accuracy: {accuracy:.2f}, emotion: {avg_emotion:.2f})")
+            logger.info(f"Batch 1 Emotion - Image: {avg_image_emotion:.2f}, Text: {avg_text_emotion:.2f}")
+            
+            # Determine batch 2 difficulty based on performance + combined emotion
+            new_difficulty = self.next_difficulty(
+                current_difficulty, 
+                accuracy, 
+                test_number=2, 
+                avg_emotion=avg_image_emotion,
+                avg_text_emotion=avg_text_emotion
+            )
+            logger.info(f"Batch 2 difficulty: {current_difficulty} → {new_difficulty} "
+                       f"(accuracy: {accuracy:.2f}, img_emotion: {avg_image_emotion:.2f}, "
+                       f"text_emotion: {avg_text_emotion:.2f})")
             
             # Generate batch 2 questions with new difficulty
             logger.info(f"Generating batch 2 questions - topic: {topic}, difficulty: {new_difficulty}")
-            sa_questions = self.generate_short_answer_questions(topic, new_difficulty)
-            mcq_questions = self.generate_mcq_questions(topic, new_difficulty)
+            text_questions = self.generate_text_answer_questions(topic, new_difficulty)
+            mcq_questions = self.generate_mcq_questions(topic, new_difficulty, num_questions=15)
             
-            # Store short answer questions (batch 2)
-            for sa_q in sa_questions[:2]:
+            # Store text answer questions (batch 2) - no predefined answers
+            for text_q in text_questions[:5]:
                 try:
                     db.execute(
                         """
                         INSERT INTO test_questions
-                        (session_id,topic,difficulty,question,options,correct_answer,explanation,batch_number)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                        (session_id,topic,difficulty,question,options,correct_answer,explanation,batch_number,question_type)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
                         """,
                         (
                             session_id,
                             topic,
                             new_difficulty,
-                            sa_q.get("query") or sa_q.get("question"),
-                            [sa_q.get("answer") or sa_q.get("sampleAnswer", "")],
-                            0,
-                            sa_q.get("answer") or sa_q.get("sampleAnswer", ""),
-                            2,
+                            text_q.get("query") or text_q.get("question"),
+                            None,  # No predefined options for text questions
+                            None,  # No predefined correct answer for text questions
+                            None,  # No predefined explanation
+                            2,  # batch_number
+                            'text',  # question_type
                         ),
                     )
                 except Exception as e:
-                    logger.error(f"Error storing batch 2 short answer: {e}")
+                    # Fallback: try without question_type column if it doesn't exist
+                    logger.warning(f"Insert with question_type failed: {e}. Trying fallback...")
+                    try:
+                        db.execute(
+                            """
+                            INSERT INTO test_questions
+                            (session_id,topic,difficulty,question,options,correct_answer,explanation,batch_number)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                            """,
+                            (
+                                session_id,
+                                topic,
+                                new_difficulty,
+                                text_q.get("query") or text_q.get("question"),
+                                None,
+                                None,
+                                None,
+                                2,
+                            ),
+                        )
+                    except Exception as fallback_error:
+                        logger.error(f"Error storing batch 2 text answer (both attempts failed): {fallback_error}")
             
-            # Store MCQ questions (batch 2)
-            for q in mcq_questions[:5]:
+            # Store MCQ questions (batch 2) - 15 MCQs
+            for q in mcq_questions[:15]:
                 try:
                     db.execute(
                         """
                         INSERT INTO test_questions
-                        (session_id,topic,difficulty,question,options,correct_answer,explanation,batch_number)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                        (session_id,topic,difficulty,question,options,correct_answer,explanation,batch_number,question_type)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
                         """,
                         (
                             session_id,
@@ -652,11 +1119,33 @@ class TestEngine:
                             q.get("options", ["A","B","C","D"]),
                             q.get("answer") or q.get("correctAnswer", 0),
                             q.get("explanation", ""),
-                            2,
+                            2,  # batch_number
+                            'mcq',  # question_type
                         ),
                     )
                 except Exception as e:
-                    logger.error(f"Error storing batch 2 MCQ: {e}")
+                    # Fallback: try without question_type column if it doesn't exist
+                    logger.warning(f"Insert with question_type failed: {e}. Trying fallback...")
+                    try:
+                        db.execute(
+                            """
+                            INSERT INTO test_questions
+                            (session_id,topic,difficulty,question,options,correct_answer,explanation,batch_number)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                            """,
+                            (
+                                session_id,
+                                topic,
+                                new_difficulty,
+                                q.get("question"),
+                                q.get("options", ["A","B","C","D"]),
+                                q.get("answer") or q.get("correctAnswer", 0),
+                                q.get("explanation", ""),
+                                2,
+                            ),
+                        )
+                    except Exception as fallback_error:
+                        logger.error(f"Error storing batch 2 MCQ (both attempts failed): {fallback_error}")
             
             # Fetch batch 2 questions
             db.execute(
@@ -697,6 +1186,69 @@ class TestEngine:
         except Exception as e:
             logger.error(f"Error generating next batch: {e}")
             raise
+
+    def evaluate_text_answer(self, topic, question, user_answer):
+        """
+        Evaluate student's open-ended text answer using LLM.
+        Returns: {"is_correct": bool, "feedback": str, "score": float (0-1)}
+        """
+        try:
+            evaluation_prompt = f"""
+You are an educator evaluating a student's answer to a question.
+Topic: {topic}
+Question: {question}
+Student's Answer: {user_answer}
+
+Evaluate if the student's answer is correct and appropriate for the question.
+Respond with a JSON object: {{"is_correct": true/false, "feedback": "explanation", "score": 0.0-1.0}}
+Where:
+- is_correct: true if answer demonstrates understanding, false otherwise
+- feedback: Brief explanation (2-3 sentences) of why answer is correct/incorrect
+- score: Decimal between 0 and 1 indicating answer quality (0=completely wrong, 1=excellent)
+
+Only respond with JSON, no other text.
+"""
+            response = self.llm.invoke(evaluation_prompt)
+            text = response.content.strip()
+            
+            # Clean up markdown if present
+            if text.startswith("```"):
+                text = text.split("```")[1]
+                if text.startswith("json"):
+                    text = text[4:]
+            
+            # Parse JSON response
+            try:
+                result = json.loads(text)
+                return {
+                    "is_correct": result.get("is_correct", False),
+                    "feedback": result.get("feedback", "Unable to evaluate"),
+                    "score": result.get("score", 0.0)
+                }
+            except json.JSONDecodeError:
+                # Try to extract JSON from response
+                match = re.search(r"\{.*\}", text, re.DOTALL)
+                if match:
+                    result = json.loads(match.group())
+                    return {
+                        "is_correct": result.get("is_correct", False),
+                        "feedback": result.get("feedback", "Unable to evaluate"),
+                        "score": result.get("score", 0.0)
+                    }
+                else:
+                    logger.error(f"Failed to parse LLM evaluation response: {text}")
+                    return {
+                        "is_correct": False,
+                        "feedback": "Unable to evaluate answer",
+                        "score": 0.0
+                    }
+        except Exception as e:
+            logger.error(f"Error evaluating text answer: {e}")
+            return {
+                "is_correct": False,
+                "feedback": f"Evaluation error: {str(e)}",
+                "score": 0.0
+            }
 
 
 # ==============================
@@ -745,31 +1297,43 @@ class EmotionService:
 
             return {"emotion": "focused", "confidence": 0.0}
 
-    def store_emotion(self, test_session_id, emotion, confidence=0.0):
-        """Store emotion for test session"""
+    def store_emotion(self, test_session_id, emotion, confidence=0.0, emotion_type="image"):
+        """Store emotion for test session with type tracking"""
         try:
             db.execute(
                 """
-                INSERT INTO test_emotions (session_id, emotion, confidence)
-                VALUES (%s, %s, %s)
+                INSERT INTO test_emotions (session_id, emotion, emotion_type, confidence)
+                VALUES (%s, %s, %s, %s)
                 """,
-                (test_session_id, emotion, confidence),
+                (test_session_id, emotion, emotion_type, confidence),
             )
-            logger.debug(f"Emotion stored: {test_session_id} - {emotion} ({confidence:.2f})")
+            logger.debug(f"Emotion stored: {test_session_id} - {emotion_type}: {emotion} ({confidence:.2f})")
         except Exception as e:
             logger.warning(f"Error storing emotion: {e}")
 
-    def get_average_emotion(self, test_session_id):
+    def get_average_emotion(self, test_session_id, emotion_type="image"):
         """Get average emotion confidence for test session"""
         try:
-            db.execute(
-                """
-                SELECT AVG(confidence) as avg_confidence
-                FROM test_emotions
-                WHERE session_id = %s
-                """,
-                (test_session_id,),
-            )
+            if emotion_type == "all":
+                # Get average of all emotions
+                db.execute(
+                    """
+                    SELECT AVG(confidence) as avg_confidence
+                    FROM test_emotions
+                    WHERE session_id = %s
+                    """,
+                    (test_session_id,),
+                )
+            else:
+                # Get specific emotion type average
+                db.execute(
+                    """
+                    SELECT AVG(confidence) as avg_confidence
+                    FROM test_emotions
+                    WHERE session_id = %s AND emotion_type = %s
+                    """,
+                    (test_session_id, emotion_type),
+                )
             result = db.fetch()
             if result and result[0][0]:
                 return float(result[0][0])
@@ -778,21 +1342,55 @@ class EmotionService:
             logger.warning(f"Error getting average emotion: {e}")
             return 0.0
 
+    def get_emotion_stats(self, test_session_id):
+        """Get detailed emotion statistics for test session"""
+        try:
+            db.execute(
+                """
+                SELECT 
+                    emotion_type,
+                    AVG(confidence) as avg_confidence,
+                    COUNT(*) as sample_count,
+                    MAX(confidence) as max_confidence,
+                    MIN(confidence) as min_confidence
+                FROM test_emotions
+                WHERE session_id = %s
+                GROUP BY emotion_type
+                """,
+                (test_session_id,),
+            )
+            results = db.fetch()
+            stats = {}
+            for row in results:
+                emotion_type, avg_conf, count, max_conf, min_conf = row
+                stats[emotion_type] = {
+                    "average": float(avg_conf) if avg_conf else 0.0,
+                    "samples": count,
+                    "max": float(max_conf) if max_conf else 0.0,
+                    "min": float(min_conf) if min_conf else 0.0
+                }
+            return stats
+        except Exception as e:
+            logger.warning(f"Error getting emotion stats: {e}")
+            return {}
+
+    def analyze_answer_emotion(self, answer_text):
+        """Analyze emotion from student's text answer using TextEmotionService"""
+        try:
+            text_service = TextEmotionService()
+            result = text_service.analyze_text(answer_text)
+            return result
+        except Exception as e:
+            logger.warning(f"Error analyzing answer emotion: {e}")
+            return {
+                "emotion": "neutral",
+                "confidence": 0.0,
+                "score": 0.5
+            }
+
     def extract_emotion_from_text(self, text):
         """
-        Extract emotion from textual answer (placeholder for future NLP implementation)
-        
-        TODO: Implement sentiment analysis on student's text answers
-        - Analyze answer length (short/verbose)
-        - Check for frustration keywords
-        - Detect confidence in response
-        - Return emotion score 0.0-1.0
-        
-        For now, returns neutral emotion score
+        Extract emotion from textual answer using sentiment analysis
+        Uses TextEmotionService for analysis
         """
-        # Placeholder implementation
-        return {
-            "emotion": "neutral",
-            "confidence": 0.5,
-            "details": "Text analysis not yet implemented"
-        }
+        return self.analyze_answer_emotion(text)
