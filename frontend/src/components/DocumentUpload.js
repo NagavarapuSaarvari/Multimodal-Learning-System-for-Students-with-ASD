@@ -117,27 +117,28 @@ function DocumentUpload() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-50 py-8">
-      <div className="max-w-4xl mx-auto px-4">
+    <div className="min-h-screen bg-white py-12">
+      <div className="max-w-6xl mx-auto px-6">
         {/* Header Section */}
-        <div className="mb-8 text-center">
-          <h2 className="text-4xl font-bold text-gray-800 mb-2">
+        <div className="mb-12 text-center">
+          <h1 className="text-5xl font-bold text-gray-900 mb-4">
             Upload Learning Materials
-          </h2>
+          </h1>
           <p className="text-gray-600 text-lg">
-            Add PDFs and YouTube videos to build your personalized learning database
+            Add PDFs and YouTube videos to build your personalized learning database. <br/>
+            YouTube transcripts and PDF content are used together with AI to create your learning materials.
           </p>
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-12">
           {/* Upload Section */}
           <div className="flex flex-col">
-            <div className="bg-white shadow-lg border border-blue-200 rounded-xl overflow-hidden flex flex-col h-full">
-              <div className="bg-gradient-to-r from-blue-500 to-blue-600 text-white p-6 flex items-center gap-3">
-                <UploadCloud size={24} />
+            <div className="bg-white border border-gray-300 rounded-2xl overflow-hidden flex flex-col h-full shadow-lg">
+              <div className="bg-blue-600 text-white p-8 flex items-center gap-3">
+                <UploadCloud size={28} />
                 <div>
-                  <h3 className="text-2xl font-bold">Upload Materials</h3>
-                  <p className="text-blue-100 text-sm">PDFs and YouTube videos</p>
+                  <h3 className="text-2xl font-bold">Upload Documents</h3>
+                  <p className="text-blue-100 text-sm">PDFs & YouTube Videos</p>
                 </div>
               </div>
 
@@ -289,11 +290,11 @@ function DocumentUpload() {
 
           {/* Documents List */}
           <div className="flex flex-col">
-            <div className="bg-white shadow-lg border border-green-200 rounded-xl overflow-hidden flex flex-col h-full">
-              <div className="bg-gradient-to-r from-green-500 to-green-600 text-white p-6 flex items-center gap-3">
-                <LinkIcon size={24} />
+            <div className="bg-white border border-gray-300 rounded-2xl overflow-hidden flex flex-col h-full shadow-lg">
+              <div className="bg-green-600 text-white p-8 flex items-center gap-3">
+                <LinkIcon size={28} />
                 <div>
-                  <h3 className="text-2xl font-bold">Uploaded Materials</h3>
+                  <h3 className="text-2xl font-bold">Your Materials</h3>
                   <p className="text-green-100 text-sm">
                     {loadingDocs ? "Loading..." : `${documents.length} item${documents.length !== 1 ? "s" : ""}`}
                   </p>
@@ -344,6 +345,40 @@ function DocumentUpload() {
               </div>
             </div>
           </div>
+        </div>
+
+        {/* Info Section */}
+        <div className="mt-12 bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-2xl p-8 max-w-2xl mx-auto">
+          <h3 className="text-xl font-bold text-gray-900 mb-4 flex items-center gap-2">
+            <span className="text-2xl">💡</span>
+            How Learning Materials are Generated
+          </h3>
+          <p className="text-gray-700 leading-relaxed mb-4">
+            When you enter a topic, our system uses <strong>Retrieval Augmented Generation (RAG)</strong> to:
+          </p>
+          <ol className="space-y-2 text-gray-700">
+            <li className="flex gap-3">
+              <span className="font-bold text-blue-600 flex-shrink-0">1.</span>
+              <span>Search across all your uploaded PDFs and YouTube transcripts</span>
+            </li>
+            <li className="flex gap-3">
+              <span className="font-bold text-blue-600 flex-shrink-0">2.</span>
+              <span>Find the most relevant content using AI semantic search</span>
+            </li>
+            <li className="flex gap-3">
+              <span className="font-bold text-blue-600 flex-shrink-0">3.</span>
+              <span>Generate personalized, ASD-optimized learning materials using your content</span>
+            </li>
+            <li className="flex gap-3">
+              <span className="font-bold text-blue-600 flex-shrink-0">4.</span>
+              <span>Create adaptive tests based on the generated materials</span>
+            </li>
+          </ol>
+          <p className="text-sm text-gray-600 mt-4 pt-4 border-t border-blue-200">
+            ✓ Both PDFs and YouTube transcripts are analyzed together<br/>
+            ✓ Your personal materials make learning more relevant<br/>
+            ✓ Content is optimized for students with autism spectrum disorder
+          </p>
         </div>
       </div>
     </div>
