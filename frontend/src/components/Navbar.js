@@ -1,8 +1,8 @@
 import React, { useState } from "react"
-import { LogOut, BarChart3, Menu, X, BookOpen, Upload } from "lucide-react"
+import { LogOut, Menu, X, BookOpen, Users, BarChart3, Upload, BookMarked } from "lucide-react"
 import { useNavigate, useLocation } from "react-router-dom"
 
-function Navbar({ user, onLogout }) {
+function Navbar({ user, selectedStudent, onLogout }) {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const navigate = useNavigate()
   const location = useLocation()
@@ -10,10 +10,16 @@ function Navbar({ user, onLogout }) {
   const handleLogout = () => {
     onLogout()
     setMobileMenuOpen(false)
+    navigate("/login")
   }
 
   const handleDashboard = () => {
     navigate("/dashboard")
+    setMobileMenuOpen(false)
+  }
+
+  const handleStudents = () => {
+    navigate("/students")
     setMobileMenuOpen(false)
   }
 
@@ -28,7 +34,7 @@ function Navbar({ user, onLogout }) {
   }
 
   const handleHome = () => {
-    navigate("/upload")
+    navigate("/dashboard")
     setMobileMenuOpen(false)
   }
 
@@ -36,80 +42,99 @@ function Navbar({ user, onLogout }) {
 
   return (
     <nav className="bg-white border-b border-gray-200 shadow-sm sticky top-0 z-50">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex justify-between items-center h-20">
-          {/* Logo & Tagline */}
-          <div className="flex items-center cursor-pointer" onClick={handleHome}>
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 bg-gradient-to-br from-blue-600 to-teal-500 rounded-lg flex items-center justify-center">
-                <span className="text-white font-bold text-lg">AI</span>
-              </div>
-              <div>
-                <h1 className="text-lg font-bold text-gray-900">Learning Pro</h1>
-                <p className="text-xs text-gray-600 font-medium">Personalized AI-Powered Learning for Students with ASD</p>
-              </div>
+      <div className="w-full px-4 sm:px-6 lg:px-8">
+        <div className="flex justify-between items-center h-16">
+          {/* Logo */}
+          <div className="flex items-center cursor-pointer gap-3" onClick={handleHome}>
+            <div className="w-10 h-10 bg-gradient-to-br from-blue-600 to-purple-600 rounded-lg flex items-center justify-center shadow-md">
+              <BookOpen size={24} className="text-white" />
+            </div>
+            <div className="hidden sm:block">
+              <h1 className="text-lg font-bold text-gray-900">LearnHub</h1>
+              <p className="text-xs text-gray-600">
+                {selectedStudent ? `Learning: ${selectedStudent.name}` : "Admin Dashboard"}
+              </p>
             </div>
           </div>
 
           {/* Desktop Navigation */}
-          <div className="hidden md:flex items-center gap-6">
+          <div className="hidden md:flex items-center gap-8">
             {user && (
               <>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-6">
                   <button
-                    onClick={handleUpload}
-                    className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all ${
-                      isActive("/upload")
-                        ? "bg-blue-600 text-white"
+                    onClick={handleDashboard}
+                    className={`flex items-center gap-2 px-3 py-2 rounded-lg font-medium transition-all ${
+                      isActive("/dashboard")
+                        ? "bg-blue-50 text-blue-600"
                         : "text-gray-700 hover:bg-gray-100"
                     }`}
                   >
-                    <Upload size={18} />
-                    Upload
+                    <BarChart3 size={18} />
+                    Dashboard
                   </button>
                   <button
-                    onClick={handleLearn}
-                    className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all ${
-                      isActive("/learn")
-                        ? "bg-blue-600 text-white"
+                    onClick={handleStudents}
+                    className={`flex items-center gap-2 px-3 py-2 rounded-lg font-medium transition-all ${
+                      isActive("/students")
+                        ? "bg-blue-50 text-blue-600"
                         : "text-gray-700 hover:bg-gray-100"
                     }`}
                   >
-                    <BookOpen size={18} />
-                    Learn
+                    <Users size={18} />
+                    Students
                   </button>
+
+                  {/* Learning Navigation - Only if student selected */}
+                  {selectedStudent && (
+                    <>
+                      <div className="border-l border-gray-300"></div>
+                      <button
+                        onClick={handleUpload}
+                        className={`flex items-center gap-2 px-3 py-2 rounded-lg font-medium transition-all ${
+                          isActive("/upload")
+                            ? "bg-blue-50 text-blue-600"
+                            : "text-gray-700 hover:bg-gray-100"
+                        }`}
+                      >
+                        <Upload size={18} />
+                        Upload
+                      </button>
+                      <button
+                        onClick={handleLearn}
+                        className={`flex items-center gap-2 px-3 py-2 rounded-lg font-medium transition-all ${
+                          isActive("/learn")
+                            ? "bg-blue-50 text-blue-600"
+                            : "text-gray-700 hover:bg-gray-100"
+                        }`}
+                      >
+                        <BookMarked size={18} />
+                        Learn
+                      </button>
+                    </>
+                  )}
                 </div>
 
                 <div className="border-l border-gray-200 pl-6 flex items-center gap-4">
-                  <button
-                    onClick={handleDashboard}
-                    className={`flex items-center gap-2 transition-colors font-medium ${
-                      isActive("/dashboard")
-                        ? "text-blue-600"
-                        : "text-gray-700 hover:text-blue-600"
-                    }`}
-                  >
-                    <BarChart3 size={20} />
-                    Dashboard
-                  </button>
-                  <div className="flex items-center gap-2 ml-4">
-                    <div className="text-right hidden sm:block">
+                  <div className="flex items-center gap-3">
+                    <div className="text-right">
                       <p className="text-sm font-medium text-gray-900">{user.name}</p>
-                      <p className="text-xs text-gray-500">{user.email}</p>
+                      <p className="text-xs text-gray-500">Admin</p>
                     </div>
                     <img
                       src={user.picture}
                       alt={user.name}
-                      className="w-10 h-10 rounded-full border-2 border-blue-600 cursor-pointer hover:border-teal-500 transition-colors"
+                      className="w-10 h-10 rounded-full border-2 border-blue-600 shadow-sm"
                       title={user.name}
                     />
                   </div>
                   <button
                     onClick={handleLogout}
-                    className="flex items-center gap-2 px-3 py-2 bg-red-50 text-red-600 rounded-lg hover:bg-red-100 transition-colors"
+                    className="flex items-center gap-2 px-3 py-2 bg-red-50 text-red-600 rounded-lg hover:bg-red-100 transition-colors font-medium"
                     title="Logout"
                   >
                     <LogOut size={18} />
+                    Logout
                   </button>
                 </div>
               </>
@@ -117,7 +142,7 @@ function Navbar({ user, onLogout }) {
           </div>
 
           {/* Mobile Menu Button */}
-          <div className="md:hidden flex items-center gap-3">
+          <div className="md:hidden flex items-center gap-4">
             {user && (
               <img
                 src={user.picture}
@@ -136,41 +161,60 @@ function Navbar({ user, onLogout }) {
 
         {/* Mobile Navigation */}
         {mobileMenuOpen && user && (
-          <div className="md:hidden border-t border-gray-200 py-4 space-y-3">
-            <button
-              onClick={handleUpload}
-              className={`w-full flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all ${
-                isActive("/upload")
-                  ? "bg-blue-600 text-white"
-                  : "text-gray-700 hover:bg-gray-100"
-              }`}
-            >
-              <Upload size={18} />
-              Upload Documents
-            </button>
-            <button
-              onClick={handleLearn}
-              className={`w-full flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all ${
-                isActive("/learn")
-                  ? "bg-blue-600 text-white"
-                  : "text-gray-700 hover:bg-gray-100"
-              }`}
-            >
-              <BookOpen size={18} />
-              Learn & Test
-            </button>
+          <div className="md:hidden border-t border-gray-200 py-4 space-y-2">
             <button
               onClick={handleDashboard}
               className={`w-full flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all ${
                 isActive("/dashboard")
-                  ? "bg-blue-600 text-white"
+                  ? "bg-blue-50 text-blue-600"
                   : "text-gray-700 hover:bg-gray-100"
               }`}
             >
               <BarChart3 size={18} />
               Dashboard
             </button>
-            <div className="px-4 py-2 border-t border-gray-200">
+            <button
+              onClick={handleStudents}
+              className={`w-full flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all ${
+                isActive("/students")
+                  ? "bg-blue-50 text-blue-600"
+                  : "text-gray-700 hover:bg-gray-100"
+              }`}
+            >
+              <Users size={18} />
+              Students
+            </button>
+
+            {/* Learning Navigation - Mobile */}
+            {selectedStudent && (
+              <>
+                <div className="border-t border-gray-200 my-2"></div>
+                <button
+                  onClick={handleUpload}
+                  className={`w-full flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all ${
+                    isActive("/upload")
+                      ? "bg-blue-50 text-blue-600"
+                      : "text-gray-700 hover:bg-gray-100"
+                  }`}
+                >
+                  <Upload size={18} />
+                  Upload Documents
+                </button>
+                <button
+                  onClick={handleLearn}
+                  className={`w-full flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all ${
+                    isActive("/learn")
+                      ? "bg-blue-50 text-blue-600"
+                      : "text-gray-700 hover:bg-gray-100"
+                  }`}
+                >
+                  <BookMarked size={18} />
+                  Learn & Test
+                </button>
+              </>
+            )}
+
+            <div className="px-4 py-3 border-t border-gray-200">
               <p className="text-sm font-medium text-gray-900">{user.name}</p>
               <p className="text-xs text-gray-500">{user.email}</p>
             </div>

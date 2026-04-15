@@ -5,24 +5,35 @@ import DocumentUpload from "./components/DocumentUpload"
 import LearnPage from "./components/LearnPage"
 import Dashboard from "./components/Dashboard"
 import LoginPage from "./components/LoginPage"
+import StudentManagement from "./components/StudentManagement"
+import AdminDashboard from "./components/AdminDashboard"
 import "./App.css"
 
 function App() {
   const [user, setUser] = useState(null)
+  const [selectedStudent, setSelectedStudent] = useState(null)
   const [loading, setLoading] = useState(true)
 
   // Check if user is already logged in
   useEffect(() => {
     const storedUser = localStorage.getItem("user")
     const token = localStorage.getItem("accessToken")
+    const adminId = localStorage.getItem("adminId")
 
     if (storedUser && token) {
       try {
-        setUser(JSON.parse(storedUser))
+        const userData = JSON.parse(storedUser)
+        setUser(userData)
+        
+        // Set admin ID if not already set
+        if (!adminId) {
+          localStorage.setItem("adminId", userData.id)
+        }
       } catch (error) {
         console.error("Error parsing stored user:", error)
         localStorage.removeItem("user")
         localStorage.removeItem("accessToken")
+        localStorage.removeItem("adminId")
       }
     }
 
@@ -31,12 +42,21 @@ function App() {
 
   const handleLoginSuccess = (userData) => {
     setUser(userData)
+    localStorage.setItem("adminId", userData.id)
   }
 
   const handleLogout = () => {
     setUser(null)
+    setSelectedStudent(null)
     localStorage.removeItem("user")
     localStorage.removeItem("accessToken")
+    localStorage.removeItem("adminId")
+    localStorage.removeItem("selectedStudent")
+  }
+
+  const handleSelectStudent = (student) => {
+    setSelectedStudent(student)
+    localStorage.setItem("selectedStudent", JSON.stringify(student))
   }
 
   if (loading) {
@@ -56,6 +76,7 @@ function App() {
         {user && (
           <Navbar
             user={user}
+            selectedStudent={selectedStudent}
             onLogout={handleLogout}
           />
         )}
@@ -67,7 +88,7 @@ function App() {
               path="/login"
               element={
                 user ? (
-                  <Navigate to="/upload" replace />
+                  <Navigate to="/dashboard" replace />
                 ) : (
                   <LoginPage onLoginSuccess={handleLoginSuccess} />
                 )
@@ -77,10 +98,39 @@ function App() {
             {/* Protected Routes */}
             {user ? (
               <>
-                <Route path="/upload" element={<DocumentUpload />} />
-                <Route path="/learn" element={<LearnPage />} />
-                <Route path="/dashboard" element={<Dashboard user={user} />} />
-                <Route path="/" element={<Navigate to="/upload" replace />} />
+                {/* Admin Routes */}
+                <Route
+                  path="/dashboard"
+                  element={
+                    <div className="min-h-screen bg-gray-50 py-8">
+                      <AdminDashboard 
+                        adminId={user.id}
+                        onSelectStudent={handleSelectStudent}
+                      />
+                    </div>
+                  }
+                />
+                <Route
+                  path="/students"
+                  element={
+                    <div className="min-h-screen bg-gray-50 py-8">
+                      <StudentManagement 
+                        adminId={user.id}
+                        onStudentAdded={(student) => handleSelectStudent(student)}
+                      />
+                    </div>
+                  }
+                />
+
+                {/* Learning Routes - Only if student is selected */}
+                {selectedStudent ? (
+                  <>
+                    <Route path="/upload" element={<DocumentUpload />} />
+                    <Route path="/learn" element={<LearnPage />} />
+                  </>
+                ) : null}
+
+                <Route path="/" element={<Navigate to="/dashboard" replace />} />
               </>
             ) : (
               <Route path="*" element={<Navigate to="/login" replace />} />

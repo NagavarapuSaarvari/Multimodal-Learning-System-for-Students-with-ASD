@@ -7,6 +7,7 @@ import base64
 import io
 import cv2
 import numpy as np
+import uuid
 from PIL import Image
 from google.auth.transport import requests
 from google.oauth2 import id_token
@@ -20,6 +21,7 @@ from services import (
     TestEngine,
     EmotionService
 )
+from database import db
 
 # Configure logging
 logging.basicConfig(
@@ -75,22 +77,56 @@ async def google_auth_callback(data: dict):
             logger.error(f"Invalid token: {e}")
             raise HTTPException(status_code=401, detail="Invalid token")
         
+        google_id = idinfo.get("sub")  # Google's numeric ID
+        email = idinfo.get("email")
+        
         # Extract user information
         user_info = {
-            "id": idinfo.get("sub"),
+            "id": google_id,
             "name": idinfo.get("name"),
-            "email": idinfo.get("email"),
+            "email": email,
             "picture": idinfo.get("picture"),
             "aud": idinfo.get("aud")
         }
         
         logger.info(f"User authenticated: {user_info['email']}")
         
-        # Generate JWT token
+        # Check if admin exists by google_id
+        db.execute(
+            "SELECT id FROM admins WHERE google_id = %s",
+            (google_id,)
+        )
+        result = db.fetch()
+        
+        if result:
+            # Admin exists, use existing UUID
+            admin_id = str(result[0][0])
+            # Update admin info
+            db.execute(
+                "UPDATE admins SET name = %s, picture = %s WHERE google_id = %s",
+                (user_info["name"], user_info["picture"], google_id)
+            )
+        else:
+            # Create new admin with UUID
+            admin_id = str(uuid.uuid4())
+            try:
+                db.execute(
+                    """
+                    INSERT INTO admins (id, google_id, email, name, picture)
+                    VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    (admin_id, google_id, email, user_info["name"], user_info["picture"])
+                )
+                logger.info(f"New admin created: {admin_id}")
+            except Exception as e:
+                logger.error(f"Error creating admin: {e}")
+                raise HTTPException(status_code=500, detail="Failed to create admin account")
+        
+        # Generate JWT token using admin_id (UUID)
         access_token = jwt.encode(
             {
-                "sub": user_info["id"],
-                "email": user_info["email"],
+                "sub": admin_id,
+                "email": email,
                 "exp": datetime.utcnow() + timedelta(days=30),
                 "iat": datetime.utcnow()
             },
@@ -101,7 +137,12 @@ async def google_auth_callback(data: dict):
         return {
             "access_token": access_token,
             "token_type": "bearer",
-            "user": user_info
+            "user": {
+                "id": admin_id,  # Return the UUID, not the Google ID
+                "name": user_info["name"],
+                "email": email,
+                "picture": user_info["picture"]
+            }
         }
         
     except ValueError as e:
@@ -133,13 +174,177 @@ async def verify_token(data: dict):
         raise HTTPException(status_code=500, detail="Token verification failed")
 
 
+# ==============================
+# STUDENT MANAGEMENT ENDPOINTS
+# ==============================
+
+@app.post("/students/create")
+async def create_student(data: dict):
+    """Create a new student"""
+    try:
+        admin_id = data.get("admin_id")
+        name = data.get("name")
+        date_of_birth = data.get("date_of_birth")  # Format: YYYY-MM-DD
+        
+        if not admin_id or not name or not date_of_birth:
+            raise ValueError("Missing required fields: admin_id, name, date_of_birth")
+        
+        # Validate admin_id is a valid UUID
+        try:
+            uuid.UUID(admin_id)
+        except (ValueError, AttributeError):
+            logger.error(f"Invalid admin_id format (not a UUID): {admin_id}")
+            raise ValueError("Invalid admin_id format. Please log in again. (Clear browser cache if problem persists)")
+        
+        # Verify admin exists
+        db.execute(
+            "SELECT id FROM admins WHERE id = %s",
+            (admin_id,)
+        )
+        admin_result = db.fetch()
+        if not admin_result:
+            logger.error(f"Admin not found: {admin_id}")
+            raise ValueError("Admin not found. Please log in again.")
+        
+        # Calculate age
+        from datetime import date as date_class
+        birth_date = datetime.strptime(date_of_birth, "%Y-%m-%d").date()
+        today = date_class.today()
+        age = today.year - birth_date.year - ((today.month, today.day) < (birth_date.month, birth_date.day))
+        
+        student_id = str(uuid.uuid4())
+        
+        db.execute(
+            """
+            INSERT INTO students (id, admin_id, name, date_of_birth, age)
+            VALUES (%s, %s, %s, %s, %s)
+            """,
+            (student_id, admin_id, name, birth_date, age)
+        )
+        
+        logger.info(f"Student created: {student_id} for admin: {admin_id}")
+        
+        return {
+            "student_id": student_id,
+            "name": name,
+            "date_of_birth": date_of_birth,
+            "age": age
+        }
+        
+    except ValueError as e:
+        logger.error(f"Validation error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error creating student: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail="Failed to create student")
+
+
+@app.get("/students/{admin_id}")
+async def get_students(admin_id: str):
+    """Get all students for an admin"""
+    try:
+        # Validate admin_id is a valid UUID
+        try:
+            uuid.UUID(admin_id)
+        except (ValueError, AttributeError):
+            logger.error(f"Invalid admin_id format (not a UUID): {admin_id}")
+            raise ValueError("Invalid admin_id format. Please log in again.")
+        
+        db.execute(
+            """
+            SELECT id, name, date_of_birth, age, created_at
+            FROM students
+            WHERE admin_id = %s
+            ORDER BY created_at DESC
+            """,
+            (admin_id,)
+        )
+        
+        results = db.fetch()
+        students = [
+            {
+                "id": r[0],
+                "name": r[1],
+                "date_of_birth": r[2].isoformat() if r[2] else None,
+                "age": r[3],
+                "created_at": r[4].isoformat() if r[4] else None
+            }
+            for r in results
+        ]
+        
+        return {"students": students}
+        
+    except ValueError as e:
+        logger.error(f"Validation error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error fetching students: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch students")
+
+
+@app.get("/students/detail/{student_id}")
+async def get_student_details(student_id: str):
+    """Get detailed information about a specific student"""
+    try:
+        db.execute(
+            """
+            SELECT id, name, date_of_birth, age, created_at
+            FROM students
+            WHERE id = %s
+            """,
+            (student_id,)
+        )
+        
+        result = db.fetch()
+        
+        if not result:
+            raise HTTPException(status_code=404, detail="Student not found")
+        
+        r = result[0]
+        student = {
+            "id": r[0],
+            "name": r[1],
+            "date_of_birth": r[2].isoformat() if r[2] else None,
+            "age": r[3],
+            "created_at": r[4].isoformat() if r[4] else None
+        }
+        
+        return student
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching student details: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch student details")
+
+
+@app.delete("/students/{student_id}")
+async def delete_student(student_id: str):
+    """Delete a student"""
+    try:
+        db.execute(
+            "DELETE FROM students WHERE id = %s",
+            (student_id,)
+        )
+        
+        logger.info(f"Student deleted: {student_id}")
+        return {"deleted": True}
+        
+    except Exception as e:
+        logger.error(f"Error deleting student: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete student")
+
+
 @app.post("/upload")
-async def upload_document(file: UploadFile):
+async def upload_document(file: UploadFile, admin_id: str = None):
     """Upload a PDF document"""
     try:
-        logger.info(f"Uploading document: {file.filename}")
+        if not admin_id:
+            raise ValueError("admin_id is required")
+        
+        logger.info(f"Uploading document: {file.filename} for admin: {admin_id}")
         file_bytes = await file.read()
-        doc_id = doc_service.upload_document(file_bytes, file.filename)
+        doc_id = doc_service.upload_document(file_bytes, file.filename, admin_id)
         logger.info(f"Document uploaded successfully: {doc_id}")
         return {"doc_id": doc_id, "filename": file.filename}
     except ValueError as e:
@@ -152,13 +357,19 @@ async def upload_document(file: UploadFile):
 
 
 @app.get("/documents")
-def get_documents():
-    """Get all uploaded documents"""
+def get_documents(admin_id: str = None):
+    """Get all uploaded documents for an admin"""
     try:
-        logger.info("Fetching documents list")
-        documents = doc_service.get_documents()
+        if not admin_id:
+            raise ValueError("admin_id is required")
+        
+        logger.info(f"Fetching documents list for admin: {admin_id}")
+        documents = doc_service.get_documents(admin_id)
         logger.info(f"Retrieved {len(documents)} documents")
         return {"documents": documents}
+    except ValueError as e:
+        logger.error(f"Validation error: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         error_msg = f"Error fetching documents: {str(e)}\n{traceback.format_exc()}"
         logger.error(error_msg)

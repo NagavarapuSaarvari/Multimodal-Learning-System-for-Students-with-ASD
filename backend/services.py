@@ -85,7 +85,7 @@ class DocumentService:
     def __init__(self):
         self.embedder = EmbeddingService()
 
-    def upload_document(self, file_bytes, filename):
+    def upload_document(self, file_bytes, filename, admin_id):
 
         if not filename.lower().endswith(".pdf"):
             raise ValueError("Only PDF files allowed")
@@ -98,8 +98,8 @@ class DocumentService:
         doc_id = str(uuid.uuid4())
 
         db.execute(
-            "INSERT INTO documents (id, filename, file_type, uploaded_at) VALUES (%s,%s,%s,NOW())",
-            (doc_id, filename, "pdf"),
+            "INSERT INTO documents (id, admin_id, filename, file_type, uploaded_at) VALUES (%s,%s,%s,%s,NOW())",
+            (doc_id, admin_id, filename, "pdf"),
         )
 
         chunks = [c.strip() for c in text.split("\n\n") if c.strip()]
@@ -119,10 +119,11 @@ class DocumentService:
 
         return doc_id
 
-    def get_documents(self):
+    def get_documents(self, admin_id):
 
         db.execute(
-            "SELECT id, filename, uploaded_at FROM documents ORDER BY uploaded_at DESC"
+            "SELECT id, filename, uploaded_at FROM documents WHERE admin_id=%s ORDER BY uploaded_at DESC",
+            (admin_id,)
         )
 
         results = db.fetch()
@@ -452,14 +453,15 @@ class RAGService:
         """
         Generate comprehensive learning material optimized for students with Autism Spectrum Disorder.
         Uses clear language, structured format, and sensory-friendly presentation.
+        Generates material that takes 5-7 minutes to read.
         """
         # Retrieve better context
-        context = self.retrieve_context(topic, limit=5)
-        if len(context) > 2000:
-            context = context[:2000]
+        context = self.retrieve_context(topic, limit=8)
+        if len(context) > 3000:
+            context = context[:3000]
 
-        # ASD-Friendly Learning Material Prompt
-        prompt = f"""You are creating learning material specifically for students with Autism Spectrum Disorder (ASD).
+        # ASD-Friendly Learning Material Prompt - COMPREHENSIVE VERSION
+        prompt = f"""You are creating detailed learning material specifically for students with Autism Spectrum Disorder (ASD).
 
 Topic: {topic}
 Difficulty Level: {difficulty}
@@ -474,24 +476,75 @@ IMPORTANT GUIDELINES for ASD learners:
 - Use consistent formatting throughout
 - Avoid sensory language that might be overwhelming
 - Be literal and specific (not figurative)
+- Include multiple examples for each concept
 
-Structure the material as follows:
+STRUCTURE: Create comprehensive, detailed learning material following this outline. Make sure the total content takes 5-7 minutes to read (approximately 2000-2500 words):
 
-1. **What is {topic}?** (Start with a clear definition in 1-2 sentences)
-2. **Main Ideas About {topic}** (List 3-4 core concepts in simple terms with clear definitions)
-3. **Step-by-Step Examples** (Show concrete examples with clear numbered steps)
-4. **What You Need to Remember** (List key points: what is important and what to avoid)
-5. **How to Practice** (Suggest simple, specific practice activities)
+## 1. Introduction to {{topic}}
+- Clear, simple definition (2-3 sentences)
+- Why this topic is important
+- What you will learn in this material
+
+## 2. Core Concepts (Detailed Section)
+- Explain 4-6 main concepts related to {{topic}}
+- For each concept, provide:
+  * Clear definition (1-2 sentences)
+  * Concrete example(s) that are easy to understand
+  * Why this concept matters
+  * Common misconceptions to avoid
+
+## 3. Step-by-Step Examples (Multiple Examples)
+- Provide 2-3 complete worked examples
+- For each example:
+  * Clear problem statement
+  * Step-by-step solution (number each step)
+  * Explanation of why each step was taken
+  * The final answer with clarification
+
+## 4. Practice Scenarios
+- 2-3 different practice situations related to {{topic}}
+- What to do in each situation
+- What NOT to do (common mistakes)
+- Expected outcomes
+
+## 5. Visual Organization Tips
+- How to organize information about {{topic}}
+- Helpful structures or formats to use
+- Tips for remembering key information
+
+## 6. Common Challenges and Solutions
+- List 3-4 common difficulties students face with {{topic}}
+- For each difficulty:
+  * What the challenge is
+  * Why it happens
+  * Step-by-step solution
+  * Prevention tips
+
+## 7. Real-World Applications
+- 2-3 real-world examples of how {{topic}} is used
+- Who uses this information
+- Why it matters in the real world
+
+## 8. Key Points Summary
+- List the most important information to remember
+- What is essential vs. optional information
+- Quiz yourself questions (with answers)
+
+## 9. Next Steps for Learning
+- How to practice what you learned
+- Where to find more information
+- How to apply this knowledge
 
 Difficulty Levels:
-- Easy: Very simple words, basic concepts, familiar examples, short paragraphs
-- Medium: Common words, multiple related concepts, varied examples, moderate detail
-- Hard: Precise terminology, complex concepts, advanced examples, detailed explanations
+- Easy: Very simple words, basic 2-3 main concepts, familiar examples, detailed explanations, short step-by-step instructions
+- Medium: Common words, 4-5 related concepts, varied examples, moderate detail with connections between ideas
+- Hard: Precise terminology, complex concepts with nuance, advanced examples, detailed explanations with theory
 
-Reference Material:
+Reference Material to Use:
 {context}
 
-Generate the learning material now in a clear, structured format suitable for ASD learners:"""
+Generate the learning material now. Make it comprehensive, detailed, and suitable for ASD learners. 
+The material should be thorough enough to take 5-7 minutes to read and understand."""
 
         try:
             response = self.llm.invoke(prompt)
@@ -503,15 +556,17 @@ Generate the learning material now in a clear, structured format suitable for AS
         # Add recommended YouTube videos
         videos = self.youtube_service.search_videos(topic, num_results=3)
 
-        video_section = "\n\n---\n\n## Recommended Videos\n\n"
+        video_section = "\n\n---\n\n## Recommended Learning Videos\n\nWatch these videos to supplement your learning:\n\n"
 
         if videos:
             for i, v in enumerate(videos, 1):
-                video_section += f"{i}. **{v['title']}** (Channel: {v['channel']})\n   Link: {v['url']}\n\n"
+                video_section += f"### {i}. {v['title']}\n"
+                video_section += f"**Channel:** {v['channel']}\n\n"
+                video_section += f"**Link:** {v['url']}\n\n"
         else:
-            video_section += "No videos found for this topic.\n"
+            video_section += "No videos found for this topic currently.\n"
 
-        logger.info(f"Generated learning material for '{topic}' at {difficulty} level")
+        logger.info(f"Generated comprehensive learning material for '{topic}' at {difficulty} level")
         return material + video_section
 
 

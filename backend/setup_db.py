@@ -11,9 +11,34 @@ class DatabaseSetup:
 
     def create_tables(self):
 
+        # Create admins table
+        db.execute("""
+        CREATE TABLE IF NOT EXISTS admins(
+            id UUID PRIMARY KEY,
+            google_id TEXT UNIQUE,
+            email TEXT UNIQUE,
+            name TEXT,
+            picture TEXT,
+            created_at TIMESTAMP DEFAULT NOW()
+        );
+        """)
+
+        # Create students table
+        db.execute("""
+        CREATE TABLE IF NOT EXISTS students(
+            id UUID PRIMARY KEY,
+            admin_id UUID REFERENCES admins(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            date_of_birth DATE NOT NULL,
+            age INT,
+            created_at TIMESTAMP DEFAULT NOW()
+        );
+        """)
+
         db.execute("""
         CREATE TABLE IF NOT EXISTS documents(
             id UUID PRIMARY KEY,
+            admin_id UUID REFERENCES admins(id) ON DELETE CASCADE,
             filename TEXT,
             file_type TEXT DEFAULT 'pdf',
             source_url TEXT,
@@ -33,6 +58,7 @@ class DatabaseSetup:
         db.execute("""
         CREATE TABLE IF NOT EXISTS learning_memory(
             id SERIAL PRIMARY KEY,
+            student_id UUID REFERENCES students(id) ON DELETE CASCADE,
             topic TEXT,
             score INT,
             difficulty TEXT DEFAULT 'easy',
@@ -43,6 +69,7 @@ class DatabaseSetup:
         db.execute("""
         CREATE TABLE IF NOT EXISTS test_sessions(
             id UUID PRIMARY KEY,
+            student_id UUID REFERENCES students(id) ON DELETE CASCADE,
             topic TEXT,
             test_number INT DEFAULT 1,
             initial_difficulty TEXT DEFAULT 'easy',
@@ -57,6 +84,7 @@ class DatabaseSetup:
         CREATE TABLE IF NOT EXISTS test_results(
             id SERIAL PRIMARY KEY,
             session_id UUID REFERENCES test_sessions(id),
+            student_id UUID REFERENCES students(id) ON DELETE CASCADE,
             topic TEXT,
             score INT,
             total_questions INT,
@@ -72,6 +100,7 @@ class DatabaseSetup:
         CREATE TABLE IF NOT EXISTS test_questions(
             id SERIAL PRIMARY KEY,
             session_id UUID REFERENCES test_sessions(id),
+            student_id UUID REFERENCES students(id) ON DELETE CASCADE,
             topic TEXT,
             difficulty TEXT,
             question TEXT,
@@ -99,6 +128,7 @@ class DatabaseSetup:
         CREATE TABLE IF NOT EXISTS test_emotions(
             id SERIAL PRIMARY KEY,
             session_id UUID REFERENCES test_sessions(id),
+            student_id UUID REFERENCES students(id) ON DELETE CASCADE,
             emotion TEXT,
             emotion_type TEXT DEFAULT 'image',
             confidence FLOAT,
@@ -177,8 +207,26 @@ class DatabaseSetup:
 
         # Add source_url to documents if missing
         try:
+            db.execute("""            ALTER TABLE user_test_answers
+            ADD COLUMN answer_text TEXT;
+            """)
+            print("✓ Added answer_text column to user_test_answers")
+        except Exception as e:
+            print(f"answer_text column already exists or error: {e}")
+
+        # Add admin_id to documents if missing
+        try:
             db.execute("""
             ALTER TABLE documents
+            ADD COLUMN admin_id UUID REFERENCES admins(id) ON DELETE CASCADE;
+            """)
+            print("✓ Added admin_id column to documents")
+        except Exception as e:
+            print(f"admin_id column already exists or error: {e}")
+
+        # Add source_url to documents if missing
+        try:
+            db.execute("""            ALTER TABLE documents
             ADD COLUMN source_url TEXT;
             """)
             print("✓ Added source_url column to documents")

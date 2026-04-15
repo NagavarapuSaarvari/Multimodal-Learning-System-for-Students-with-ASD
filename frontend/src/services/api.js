@@ -2,12 +2,16 @@ const API_BASE = "http://localhost:8000";
 
 // Document Management
 export const uploadDocument = async (file) => {
+  const adminId = localStorage.getItem("adminId");
   const formData = new FormData();
   formData.append("file", file);
   
-  const response = await fetch(`${API_BASE}/upload`, {
+  const response = await fetch(`${API_BASE}/upload?admin_id=${adminId}`, {
     method: "POST",
     body: formData,
+    headers: {
+      Authorization: `Bearer ${localStorage.getItem("accessToken")}`,
+    },
   });
   
   if (!response.ok) {
@@ -19,7 +23,12 @@ export const uploadDocument = async (file) => {
 };
 
 export const getDocuments = async () => {
-  const response = await fetch(`${API_BASE}/documents`);
+  const adminId = localStorage.getItem("adminId");
+  const response = await fetch(`${API_BASE}/documents?admin_id=${adminId}`, {
+    headers: {
+      Authorization: `Bearer ${localStorage.getItem("accessToken")}`,
+    },
+  });
   
   if (!response.ok) {
     throw new Error("Failed to fetch documents");
@@ -31,6 +40,9 @@ export const getDocuments = async () => {
 export const deleteDocument = async (docId) => {
   const response = await fetch(`${API_BASE}/documents/${docId}`, {
     method: "DELETE",
+    headers: {
+      Authorization: `Bearer ${localStorage.getItem("accessToken")}`,
+    },
   });
   
   if (!response.ok) {
@@ -41,10 +53,14 @@ export const deleteDocument = async (docId) => {
 };
 
 export const uploadYouTube = async (youtubeUrl) => {
+  const adminId = localStorage.getItem("adminId");
   const response = await fetch(
-    `${API_BASE}/upload-youtube?youtube_url=${encodeURIComponent(youtubeUrl)}`,
+    `${API_BASE}/upload-youtube?youtube_url=${encodeURIComponent(youtubeUrl)}&admin_id=${adminId}`,
     {
       method: "POST",
+      headers: {
+        Authorization: `Bearer ${localStorage.getItem("accessToken")}`,
+      },
     }
   );
   
@@ -58,8 +74,14 @@ export const uploadYouTube = async (youtubeUrl) => {
 
 // Learning Material
 export const generateLearningMaterial = async (topic, difficulty = "easy") => {
+  const selectedStudent = JSON.parse(localStorage.getItem("selectedStudent") || "{}");
   const response = await fetch(
-    `${API_BASE}/learn?topic=${encodeURIComponent(topic)}&difficulty=${difficulty}`
+    `${API_BASE}/learn?topic=${encodeURIComponent(topic)}&difficulty=${difficulty}&student_id=${selectedStudent.id}`,
+    {
+      headers: {
+        Authorization: `Bearer ${localStorage.getItem("accessToken")}`,
+      },
+    }
   );
   
   if (!response.ok) {
@@ -72,10 +94,14 @@ export const generateLearningMaterial = async (topic, difficulty = "easy") => {
 // Test Management
 export const createTest = async (topic, difficulty = "easy") => {
   try {
+    const selectedStudent = JSON.parse(localStorage.getItem("selectedStudent") || "{}");
     const response = await fetch(
-      `${API_BASE}/test/create?topic=${encodeURIComponent(topic)}&difficulty=${difficulty}`,
+      `${API_BASE}/test/create?topic=${encodeURIComponent(topic)}&difficulty=${difficulty}&student_id=${selectedStudent.id}`,
       {
         method: "POST",
+        headers: {
+          Authorization: `Bearer ${localStorage.getItem("accessToken")}`,
+        },
       }
     );
     
@@ -93,9 +119,10 @@ export const createTest = async (topic, difficulty = "easy") => {
 
 export const submitAnswer = async (testSessionId, questionIndex, userAnswer) => {
   try {
+    const selectedStudent = JSON.parse(localStorage.getItem("selectedStudent") || "{}");
     console.log(`[API] Submitting answer - Session: ${testSessionId}, Question Index: ${questionIndex}, Answer: ${userAnswer}`);
     const response = await fetch(
-      `${API_BASE}/test/answer?test_session_id=${testSessionId}&question_index=${questionIndex}&user_answer=${userAnswer}`,
+      `${API_BASE}/test/answer?test_session_id=${testSessionId}&question_index=${questionIndex}&user_answer=${userAnswer}&student_id=${selectedStudent.id}`,
       {
         method: "POST",
       }

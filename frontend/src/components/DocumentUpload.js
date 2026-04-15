@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { uploadDocument, uploadYouTube, getDocuments, deleteDocument } from "../services/api";
-import { UploadCloud, FileText, Trash2, Youtube, Link as LinkIcon } from "lucide-react";
+import { UploadCloud, FileText, Trash2, Youtube, Link as LinkIcon, AlertCircle } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 
 function DocumentUpload() {
 
@@ -11,8 +12,17 @@ function DocumentUpload() {
   const [documents, setDocuments] = useState([]);
   const [loadingDocs, setLoadingDocs] = useState(false);
   const [error, setError] = useState("");
+  const [selectedStudent, setSelectedStudent] = useState(null);
+  const navigate = useNavigate();
 
   useEffect(() => {
+    // Check if student is selected
+    const student = JSON.parse(localStorage.getItem("selectedStudent") || "null");
+    if (!student) {
+      setError("Please select a student from the dashboard first");
+      return;
+    }
+    setSelectedStudent(student);
     fetchDocuments();
   }, []);
 
@@ -55,6 +65,10 @@ function DocumentUpload() {
 
   const handleUpload = async () => {
     if (!file) return;
+    if (!selectedStudent) {
+      setError("Please select a student first");
+      return;
+    }
 
     try {
       setLoading(true);
@@ -74,6 +88,10 @@ function DocumentUpload() {
   const handleYoutubeUpload = async () => {
     if (!youtubeUrl.trim()) {
       setError("Please enter a YouTube URL");
+      return;
+    }
+    if (!selectedStudent) {
+      setError("Please select a student first");
       return;
     }
 
@@ -119,6 +137,25 @@ function DocumentUpload() {
   return (
     <div className="min-h-screen bg-white py-12">
       <div className="max-w-6xl mx-auto px-6">
+        {/* No Student Selected Warning */}
+        {!selectedStudent && (
+          <div className="mb-8 p-6 bg-yellow-50 border border-yellow-200 rounded-lg flex gap-4">
+            <AlertCircle className="text-yellow-600 flex-shrink-0 mt-0.5" size={24} />
+            <div>
+              <h3 className="font-semibold text-yellow-900 mb-1">No Student Selected</h3>
+              <p className="text-yellow-800 text-sm mb-3">
+                You need to select a student from the dashboard before uploading documents.
+              </p>
+              <button
+                onClick={() => navigate("/dashboard")}
+                className="px-4 py-2 bg-yellow-600 text-white rounded-lg hover:bg-yellow-700 transition-colors font-medium text-sm"
+              >
+                Go to Dashboard
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Header Section */}
         <div className="mb-12 text-center">
           <h1 className="text-5xl font-bold text-gray-900 mb-4">
