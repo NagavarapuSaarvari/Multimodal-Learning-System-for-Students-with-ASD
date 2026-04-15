@@ -8,6 +8,11 @@ import io
 import cv2
 import numpy as np
 from PIL import Image
+from google.auth.transport import requests
+from google.oauth2 import id_token
+import jwt
+import os
+from datetime import datetime, timedelta
 from services import (
     DocumentService,
     RAGService,
@@ -22,6 +27,10 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Get configuration from environment
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+JWT_SECRET = os.getenv("JWT_SECRET", "your_super_secret_jwt_key_change_this_in_production")
 
 app = FastAPI()
 
@@ -38,6 +47,90 @@ rag_service = RAGService()
 memory_service = MemoryService()
 test_engine = TestEngine()
 emotion_service = EmotionService()
+
+
+# ==============================
+# AUTHENTICATION ENDPOINTS
+# ==============================
+
+@app.post("/auth/google/callback")
+async def google_auth_callback(data: dict):
+    """Handle Google OAuth token and return JWT"""
+    try:
+        token = data.get("token")
+        
+        if not token:
+            raise ValueError("No token provided")
+        
+        logger.info("Processing Google OAuth token")
+        
+        # Verify Google token
+        try:
+            idinfo = id_token.verify_oauth2_token(
+                token,
+                requests.Request(),
+                GOOGLE_CLIENT_ID
+            )
+        except ValueError as e:
+            logger.error(f"Invalid token: {e}")
+            raise HTTPException(status_code=401, detail="Invalid token")
+        
+        # Extract user information
+        user_info = {
+            "id": idinfo.get("sub"),
+            "name": idinfo.get("name"),
+            "email": idinfo.get("email"),
+            "picture": idinfo.get("picture"),
+            "aud": idinfo.get("aud")
+        }
+        
+        logger.info(f"User authenticated: {user_info['email']}")
+        
+        # Generate JWT token
+        access_token = jwt.encode(
+            {
+                "sub": user_info["id"],
+                "email": user_info["email"],
+                "exp": datetime.utcnow() + timedelta(days=30),
+                "iat": datetime.utcnow()
+            },
+            JWT_SECRET,
+            algorithm="HS256"
+        )
+        
+        return {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "user": user_info
+        }
+        
+    except ValueError as e:
+        logger.error(f"OAuth error: {e}")
+        raise HTTPException(status_code=401, detail=str(e))
+    except Exception as e:
+        logger.error(f"Authentication error: {e}")
+        raise HTTPException(status_code=500, detail="Authentication failed")
+
+
+@app.post("/auth/verify")
+async def verify_token(data: dict):
+    """Verify JWT token validity"""
+    try:
+        token = data.get("token")
+        
+        if not token:
+            raise ValueError("No token provided")
+        
+        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        return {"valid": True, "user_id": payload.get("sub")}
+        
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    except Exception as e:
+        logger.error(f"Token verification error: {e}")
+        raise HTTPException(status_code=500, detail="Token verification failed")
 
 
 @app.post("/upload")

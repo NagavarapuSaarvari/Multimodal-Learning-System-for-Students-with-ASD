@@ -450,39 +450,48 @@ class RAGService:
 
     def generate_material(self, topic, memory, difficulty="easy"):
         """
-        Generate comprehensive learning material with better structure
-        Includes: concepts, examples, key points, study tips
+        Generate comprehensive learning material optimized for students with Autism Spectrum Disorder.
+        Uses clear language, structured format, and sensory-friendly presentation.
         """
         # Retrieve better context
         context = self.retrieve_context(topic, limit=5)
         if len(context) > 2000:
             context = context[:2000]
 
-        # Structure the prompt for better output
-        prompt = f"""Create comprehensive learning material for the topic: '{topic}' at {difficulty} level.
+        # ASD-Friendly Learning Material Prompt
+        prompt = f"""You are creating learning material specifically for students with Autism Spectrum Disorder (ASD).
+
+Topic: {topic}
+Difficulty Level: {difficulty}
+
+IMPORTANT GUIDELINES for ASD learners:
+- Use clear, concrete language (avoid metaphors, idioms, or abstract concepts)
+- Break information into small, logical chunks
+- Use numbered lists and bullet points instead of paragraphs
+- Be explicit about connections between concepts
+- Provide clear definitions before using new terms
+- Include step-by-step explanations for everything
+- Use consistent formatting throughout
+- Avoid sensory language that might be overwhelming
+- Be literal and specific (not figurative)
 
 Structure the material as follows:
-1. **Core Concepts**: Define the main concepts and explain them simply
-2. **Key Points**: List 3-5 essential points to remember  
-3. **Examples**: Provide 2-3 real-world examples
-4. **Common Mistakes**: Highlight 2-3 common misconceptions
-5. **Study Tips**: Give tips specific to learning this topic effectively
 
-Difficulty Level: {difficulty}
-- Easy: Use simple language, basic concepts, relatable examples
-- Medium: Mix basic and advanced concepts, real-world applications
-- Hard: Complex explanations, advanced concepts, detailed analysis
+1. **What is {topic}?** (Start with a clear definition in 1-2 sentences)
+2. **Main Ideas About {topic}** (List 3-4 core concepts in simple terms with clear definitions)
+3. **Step-by-Step Examples** (Show concrete examples with clear numbered steps)
+4. **What You Need to Remember** (List key points: what is important and what to avoid)
+5. **How to Practice** (Suggest simple, specific practice activities)
 
-Keep the response clear, well-structured, and suitable for students with autism. Use:
-- Clear language without jargon
-- Step-by-step explanations
-- Visual descriptions where helpful
-- Logical flow and organization
+Difficulty Levels:
+- Easy: Very simple words, basic concepts, familiar examples, short paragraphs
+- Medium: Common words, multiple related concepts, varied examples, moderate detail
+- Hard: Precise terminology, complex concepts, advanced examples, detailed explanations
 
-Retrieved Reference Material:
+Reference Material:
 {context}
 
-Generate the learning material now:"""
+Generate the learning material now in a clear, structured format suitable for ASD learners:"""
 
         try:
             response = self.llm.invoke(prompt)
@@ -623,8 +632,26 @@ class TestEngine:
         return next_level
 
     def generate_text_answer_questions(self, topic, difficulty="easy"):
-        """Generate 5 open-ended text questions (answers not predefined) - separate LLM call"""
-        prompt = f"Generate exactly 5 open-ended questions about {topic} at {difficulty} level. These are for student essay/text responses. Don't provide expected answers.\n\nJSON: {{\"questions\": [{{\"question\": \"text\"}}]}}"
+        """Generate 5 open-ended text questions optimized for ASD students - separate LLM call"""
+        prompt = f"""Generate exactly 5 open-ended questions about {topic} at {difficulty} level for students with Autism Spectrum Disorder.
+
+Guidelines for ASD-friendly questions:
+- Use clear, simple language
+- Ask specific questions (not vague ones)
+- Avoid open-ended vague prompts - guide students toward specific answers
+- Use concrete examples or scenarios when possible
+- Be literal and straightforward
+- One question per concept
+
+Difficulty: {difficulty}
+- Easy: Literal questions, factual recall, simple applications
+- Medium: Explanations, simple connections between concepts
+- Hard: Analysis, comparisons, complex problem-solving
+
+Do NOT provide expected answers.
+Format as JSON with questions array.
+
+Generate the questions now:"""
         
         response = self.llm.invoke(prompt)
         text = response.content.strip()
@@ -645,8 +672,26 @@ class TestEngine:
             return []
 
     def generate_mcq_questions(self, topic, difficulty="easy", num_questions=15):
-        """Generate MCQ questions with configurable count (default 15)"""
-        prompt = f"Generate exactly {num_questions} multiple choice questions about {topic} at {difficulty} level.\n\nJSON: {{\"questions\": [{{\"question\": \"text\", \"options\": [\"A\",\"B\",\"C\",\"D\"], \"answer\": 0, \"explanation\": \"text\"}}]}}"
+        """Generate MCQ questions optimized for ASD students - configurable count (default 15)"""
+        prompt = f"""Generate exactly {num_questions} multiple choice questions about {topic} at {difficulty} level for students with Autism Spectrum Disorder.
+
+Guidelines for ASD-friendly multiple choice:
+- Use clear, straightforward language
+- Avoid trick questions or subtle differences
+- Make wrong answers obviously wrong (not tricky)
+- Each option should be clearly distinct
+- Use concrete examples, not abstract concepts
+- Be literal and specific
+
+Difficulty: {difficulty}
+- Easy: Direct factual questions, obvious correct answers
+- Medium: Application questions, clearer distractors
+- Hard: Complex understanding, more similar options
+
+Each question must have exactly 4 options.
+Format as JSON with questions array.
+
+Generate the questions now:"""
         
         response = self.llm.invoke(prompt)
         text = response.content.strip()
