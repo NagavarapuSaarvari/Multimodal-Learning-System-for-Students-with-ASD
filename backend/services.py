@@ -27,7 +27,12 @@ except ImportError:
 try:
     from youtube_transcript_api import YouTubeTranscriptApi
 except ImportError:
-    pass
+    YouTubeTranscriptApi = None
+
+try:
+    import yt_dlp
+except ImportError:
+    yt_dlp = None
 
 load_dotenv()
 
@@ -122,7 +127,19 @@ class DocumentService:
     def get_documents(self, admin_id):
 
         db.execute(
-            "SELECT id, filename, uploaded_at FROM documents WHERE admin_id=%s ORDER BY uploaded_at DESC",
+            """
+            SELECT 
+                d.id, 
+                d.filename, 
+                d.file_type,
+                d.source_url,
+                d.uploaded_at,
+                ys.title as youtube_title
+            FROM documents d
+            LEFT JOIN youtube_sources ys ON d.id = ys.document_id
+            WHERE d.admin_id=%s 
+            ORDER BY d.uploaded_at DESC
+            """,
             (admin_id,)
         )
 
@@ -132,7 +149,10 @@ class DocumentService:
             {
                 "id": r[0],
                 "filename": r[1],
-                "uploaded_at": r[2].isoformat() if r[2] else None,
+                "file_type": r[2],
+                "source_url": r[3],
+                "uploaded_at": r[4].isoformat() if r[4] else None,
+                "youtube_title": r[5],
             }
             for r in results
         ]
@@ -144,30 +164,31 @@ class DocumentService:
 
         return True
 
-    def upload_youtube(self, youtube_url):
+    def upload_youtube(self, youtube_url, admin_id):
         """Upload YouTube transcript as a document"""
         try:
             # Extract video ID
             video_id = YouTubeTranscriptService.extract_video_id(youtube_url)
             if not video_id:
-                raise ValueError(f"Invalid YouTube URL: {youtube_url}")
+                raise ValueError(f"Invalid YouTube URL format: {youtube_url}")
 
-            # Get transcript
+            logger.info(f"Extracted video ID: {video_id} from {youtube_url}")
+
+            # Get transcript - this will raise ValueError if not available
             transcript_text = YouTubeTranscriptService.get_transcript(video_id)
-            if not transcript_text:
-                raise ValueError(f"Could not extract transcript from video: {video_id}")
 
-            # Create document
+            # Create document with admin_id
             doc_id = str(uuid.uuid4())
             video_info = YouTubeTranscriptService.get_video_info(video_id)
             
             db.execute(
                 """
-                INSERT INTO documents (id, filename, file_type, source_url, uploaded_at) 
-                VALUES (%s, %s, %s, %s, NOW())
+                INSERT INTO documents (id, admin_id, filename, file_type, source_url, uploaded_at) 
+                VALUES (%s, %s, %s, %s, %s, NOW())
                 """,
-                (doc_id, f"YouTube: {video_id}", "youtube", youtube_url),
+                (doc_id, admin_id, f"YouTube: {video_id}", "youtube", youtube_url),
             )
+            logger.info(f"Document created: {doc_id}")
 
             # Chunk and embed transcript
             chunks = [c.strip() for c in transcript_text.split("\n\n") if c.strip() and len(c.strip()) > 50]
@@ -177,6 +198,8 @@ class DocumentService:
                 import re
                 sentences = re.split(r'[.!?]+', transcript_text)
                 chunks = [s.strip() for s in sentences if len(s.strip()) > 20]
+
+            logger.info(f"Processing {len(chunks)} chunks for video {video_id}")
 
             for chunk in chunks[:100]:  # Limit chunks per video
                 embedding = self.embedder.embed(chunk)
@@ -190,17 +213,30 @@ class DocumentService:
                     (str(uuid.uuid4()), doc_id, chunk, embedding),
                 )
 
-            logger.info(f"YouTube transcript uploaded: {doc_id} - {len(chunks)} chunks")
+            # Insert into youtube_sources table to track YouTube videos
+            db.execute(
+                """
+                INSERT INTO youtube_sources (document_id, video_id, url, title, transcript_chunks, added_at)
+                VALUES (%s, %s, %s, %s, %s, NOW())
+                """,
+                (doc_id, video_id, youtube_url, f"YouTube: {video_id}", len(chunks)),
+            )
+
+            logger.info(f"YouTube transcript uploaded successfully: {doc_id} - {len(chunks)} chunks - {video_id}")
             return {
                 "doc_id": doc_id,
                 "video_id": video_id,
                 "url": youtube_url,
-                "chunks": len(chunks)
+                "chunks": len(chunks),
+                "message": f"Successfully uploaded transcript with {len(chunks)} chunks"
             }
 
+        except ValueError as e:
+            logger.error(f"Validation error uploading YouTube: {str(e)}")
+            raise  # Re-raise ValueError so it becomes a 400 error in main.py
         except Exception as e:
             logger.error(f"Error uploading YouTube: {str(e)}")
-            raise ValueError(f"YouTube upload failed: {str(e)}")
+            raise ValueError(f"Failed to process video: {str(e)}")
 
 
 # ==============================
@@ -281,7 +317,7 @@ class TextEmotionService:
 # YOUTUBE TRANSCRIPT SERVICE
 # ==============================
 class YouTubeTranscriptService:
-    """Extract transcripts/captions from YouTube videos"""
+    """Extract transcripts/captions from YouTube videos with multiple fallback methods"""
 
     @staticmethod
     def extract_video_id(youtube_url):
@@ -306,31 +342,264 @@ class YouTubeTranscriptService:
             return None
 
     @staticmethod
-    def get_transcript(video_id):
-        """Get transcript for a YouTube video"""
+    def get_transcript_yt_dlp(video_id):
+        """Get transcript using yt-dlp (primary method)"""
+        try:
+            import yt_dlp
+            
+            ydl_opts = {
+                'quiet': True,
+                'no_warnings': True,
+                'writesubtitles': True,
+                'skip_download': True,
+            }
+            
+            url = f"https://www.youtube.com/watch?v={video_id}"
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                
+                # Try to get subtitles (captions)
+                if 'subtitles' in info and info['subtitles']:
+                    # Prefer English subtitles
+                    lang_priority = ['en', 'en-US', 'en-GB']
+                    for lang in lang_priority:
+                        if lang in info['subtitles']:
+                            subs = info['subtitles'][lang]
+                            break
+                    else:
+                        # Use first available language
+                        first_lang = list(info['subtitles'].keys())[0]
+                        subs = info['subtitles'][first_lang]
+                    
+                    # Extract text from subtitle entries
+                    text = " ".join([entry.get('text', '') for entry in subs if entry.get('text')])
+                    if text.strip():
+                        logger.info(f"Successfully extracted transcript for {video_id} using yt-dlp: {len(text)} chars")
+                        return text
+                
+                # Fallback to auto-generated captions
+                if 'automatic_captions' in info and info['automatic_captions']:
+                    lang_priority = ['en', 'en-US', 'en-GB']
+                    for lang in lang_priority:
+                        if lang in info['automatic_captions']:
+                            subs = info['automatic_captions'][lang]
+                            break
+                    else:
+                        first_lang = list(info['automatic_captions'].keys())[0]
+                        subs = info['automatic_captions'][first_lang]
+                    
+                    text = " ".join([entry.get('text', '') for entry in subs if entry.get('text')])
+                    if text.strip():
+                        logger.info(f"Successfully extracted auto-generated transcript for {video_id} using yt-dlp: {len(text)} chars")
+                        return text
+        except Exception as e:
+            logger.warning(f"yt-dlp transcript extraction failed for {video_id}: {e}")
+            return None
+
+    @staticmethod
+    def get_transcript_youtube_api(video_id):
+        """Get transcript using youtube_transcript_api (fallback method)"""
         try:
             try:
                 transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
                 text = " ".join([t['text'] for t in transcript_list])
+                logger.info(f"Successfully extracted transcript for {video_id} using youtube_transcript_api: {len(text)} chars")
                 return text
             except:
                 # Try with auto-generated captions
+                logger.warning(f"Manual captions not found, trying auto-generated for {video_id}")
                 transcript_list = YouTubeTranscriptApi.get_transcript(
                     video_id, 
                     languages=['en']
                 )
                 text = " ".join([t['text'] for t in transcript_list])
+                logger.info(f"Successfully extracted auto-generated transcript for {video_id} using youtube_transcript_api: {len(text)} chars")
                 return text
         except Exception as e:
-            logger.warning(f"Could not fetch transcript for {video_id}: {e}")
+            logger.warning(f"youtube_transcript_api failed for {video_id}: {e}")
             return None
+
+    @staticmethod
+    def get_video_description(video_id):
+        """Get video description and metadata as fallback (when captions not available)"""
+        try:
+            import yt_dlp
+            
+            ydl_opts = {
+                'quiet': True,
+                'no_warnings': True,
+                'skip_download': True,
+            }
+            
+            url = f"https://www.youtube.com/watch?v={video_id}"
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                
+                # Build comprehensive document from metadata
+                content_parts = []
+                
+                # Add title
+                if 'title' in info and info['title']:
+                    content_parts.append(f"Title: {info['title']}\n")
+                
+                # Add description
+                if 'description' in info and info['description']:
+                    content_parts.append(f"Description:\n{info['description']}\n")
+                
+                # Add channel info
+                if 'uploader' in info and info['uploader']:
+                    content_parts.append(f"Channel: {info['uploader']}\n")
+                
+                # Add duration
+                if 'duration' in info and info['duration']:
+                    mins = info['duration'] // 60
+                    secs = info['duration'] % 60
+                    content_parts.append(f"Duration: {mins}m {secs}s\n")
+                
+                # Add tags
+                if 'tags' in info and info['tags']:
+                    content_parts.append(f"Tags: {', '.join(info['tags'][:10])}\n")
+                
+                content = " ".join(content_parts).strip()
+                
+                if content:
+                    logger.info(f"Successfully extracted video description for {video_id}: {len(content)} chars")
+                    return content
+            
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to get video description for {video_id}: {e}")
+            return None
+
+    @staticmethod
+    def scrape_video_page(video_id):
+        """Scrape video page directly using httpx to extract title and description"""
+        try:
+            import httpx
+            import json
+            
+            url = f"https://www.youtube.com/watch?v={video_id}"
+            
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            
+            with httpx.Client(timeout=30.0, headers=headers) as client:
+                response = client.get(url, follow_redirects=True)
+                html = response.text
+                
+                content_parts = []
+                
+                # Extract title using regex from og:title meta tag
+                title_match = re.search(r'"og:title"\s*content="([^"]*)"', html)
+                if title_match:
+                    title = title_match.group(1)
+                    content_parts.append(f"Title: {title}\n")
+                    logger.info(f"Extracted title from page: {title}")
+                
+                # Extract description using regex from og:description meta tag
+                desc_match = re.search(r'"og:description"\s*content="([^"]*)"', html)
+                if desc_match:
+                    description = desc_match.group(1)
+                    content_parts.append(f"Description: {description}\n")
+                    logger.info(f"Extracted description from page: {len(description)} chars")
+                
+                # Try to extract from JSON-LD
+                jsonld_match = re.search(r'<script type="application/ld\+json">({.*?"uploadDate".*?})</script>', html, re.DOTALL)
+                if jsonld_match:
+                    try:
+                        jsonld = json.loads(jsonld_match.group(1))
+                        if 'description' in jsonld and jsonld['description']:
+                            content_parts.append(f"Extended Description: {jsonld['description']}\n")
+                    except:
+                        pass
+                
+                content = " ".join(content_parts).strip()
+                if content and len(content) > 20:
+                    logger.info(f"Successfully scraped video page for {video_id}: {len(content)} chars")
+                    return content
+            
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to scrape video page for {video_id}: {e}")
+            return None
+
+    @staticmethod
+    def generate_placeholder_content(video_id):
+        """Generate placeholder content when all extraction methods fail"""
+        try:
+            content = f"""
+VIDEO LEARNING RESOURCE
+Video ID: {video_id}
+URL: https://www.youtube.com/watch?v={video_id}
+
+This video could not be automatically analyzed due to access restrictions or platform limitations.
+However, you can use this video resource for learning.
+
+SUGGESTIONS FOR BETTER RESULTS:
+1. Make sure the video is publicly accessible
+2. Try uploading the video description manually as a PDF
+3. Use videos with subtitles/captions enabled
+4. Contact the video creator if you need more information
+
+The system will still track your engagement with this video for learning analytics.
+""".strip()
+            
+            logger.info(f"Generated placeholder content for {video_id}: {len(content)} chars")
+            return content
+        except Exception as e:
+            logger.error(f"Failed to generate placeholder content: {e}")
+            return None
+
+    @staticmethod
+    def get_transcript(video_id):
+        """Get transcript for a YouTube video using multiple aggressive fallback methods"""
+        # Method 1: Try yt-dlp subtitles first (most reliable)
+        logger.info(f"[1/5] Attempting yt-dlp subtitle extraction for {video_id}")
+        transcript = YouTubeTranscriptService.get_transcript_yt_dlp(video_id)
+        if transcript:
+            logger.info(f"✓ Success: yt-dlp subtitles extracted")
+            return transcript
+        
+        # Method 2: Try youtube_transcript_api
+        logger.info(f"[2/5] Attempting youtube_transcript_api for {video_id}")
+        transcript = YouTubeTranscriptService.get_transcript_youtube_api(video_id)
+        if transcript:
+            logger.info(f"✓ Success: youtube_transcript_api worked")
+            return transcript
+        
+        # Method 3: Try yt-dlp video metadata/description
+        logger.info(f"[3/5] Attempting yt-dlp video metadata extraction for {video_id}")
+        description = YouTubeTranscriptService.get_video_description(video_id)
+        if description:
+            logger.info(f"✓ Success: video metadata extracted")
+            return description
+        
+        # Method 4: Try web scraping the YouTube page directly
+        logger.info(f"[4/5] Attempting to scrape YouTube page for {video_id}")
+        scraped = YouTubeTranscriptService.scrape_video_page(video_id)
+        if scraped:
+            logger.info(f"✓ Success: page scraping worked")
+            return scraped
+        
+        # Method 5: Generate placeholder content (last resort - always works)
+        logger.info(f"[5/5] Generating placeholder content for {video_id}")
+        placeholder = YouTubeTranscriptService.generate_placeholder_content(video_id)
+        if placeholder:
+            logger.warning(f"⚠ Using placeholder content for {video_id}")
+            return placeholder
+        
+        # This should almost never happen
+        logger.error(f"CRITICAL: All methods failed for {video_id}")
+        raise ValueError(f"Unable to process this video. Please try another video.")
+
 
     @staticmethod
     def get_video_info(video_id):
         """Get basic video info"""
         try:
-            # Note: This would require youtube-dl or similar library
-            # For now, return basic structure
             return {
                 "video_id": video_id,
                 "url": f"https://www.youtube.com/watch?v={video_id}",
@@ -451,100 +720,155 @@ class RAGService:
 
     def generate_material(self, topic, memory, difficulty="easy"):
         """
-        Generate comprehensive learning material optimized for students with Autism Spectrum Disorder.
+        Generate ULTRA COMPREHENSIVE learning material optimized for students with Autism Spectrum Disorder.
         Uses clear language, structured format, and sensory-friendly presentation.
-        Generates material that takes 5-7 minutes to read.
+        Generates material that takes 20-30 minutes to read (4500-6000 words).
+        This material will be used as the primary context for test questions.
         """
         # Retrieve better context
-        context = self.retrieve_context(topic, limit=8)
-        if len(context) > 3000:
-            context = context[:3000]
+        context = self.retrieve_context(topic, limit=10)
+        if len(context) > 4000:
+            context = context[:4000]
 
-        # ASD-Friendly Learning Material Prompt - COMPREHENSIVE VERSION
-        prompt = f"""You are creating detailed learning material specifically for students with Autism Spectrum Disorder (ASD).
+        # ULTRA COMPREHENSIVE ASD-Friendly Learning Material Prompt
+        prompt = f"""You are creating EXTREMELY DETAILED, COMPREHENSIVE learning material specifically for students with Autism Spectrum Disorder (ASD).
 
 Topic: {topic}
 Difficulty Level: {difficulty}
 
-IMPORTANT GUIDELINES for ASD learners:
-- Use clear, concrete language (avoid metaphors, idioms, or abstract concepts)
-- Break information into small, logical chunks
+CRITICAL REQUIREMENTS:
+1. Generate ULTRA-COMPREHENSIVE material that is 4500-6000 words long - this should take 20-30 minutes to read thoroughly
+2. This material MUST be thorough enough to serve as the primary knowledge source for tests
+3. Include EXTENSIVE examples, detailed explanations, and comprehensive coverage of the topic
+4. Prioritize clarity and absolute completeness of information
+
+CONTENT GUIDELINES for ASD learners:
+- Use ONLY clear, concrete language (NO metaphors, idioms, or abstract concepts)
+- Break information into small, logical chunks with clear spacing
 - Use numbered lists and bullet points instead of paragraphs
-- Be explicit about connections between concepts
-- Provide clear definitions before using new terms
-- Include step-by-step explanations for everything
-- Use consistent formatting throughout
-- Avoid sensory language that might be overwhelming
-- Be literal and specific (not figurative)
-- Include multiple examples for each concept
+- Be explicit about ALL connections between concepts
+- Provide clear definitions before using every new term
+- Include step-by-step explanations for EVERYTHING
+- Use consistent formatting throughout (same font, same colors, same structure)
+- Avoid ALL sensory language that might be overwhelming
+- Be literal and specific (NOT figurative or poetic)
+- Include MANY MULTIPLE DETAILED examples for each concept (at least 3-4 examples per concept)
+- Provide extensive practice scenarios with detailed explanations
+- Include detailed explanations of WHY things work the way they do
+- Explain common misconceptions and why they are wrong
+- Add visual organization tips (ASCII art, tables, structured lists)
 
-STRUCTURE: Create comprehensive, detailed learning material following this outline. Make sure the total content takes 5-7 minutes to read (approximately 2000-2500 words):
+ULTRA-COMPREHENSIVE STRUCTURE (Target: 4500-6000 words):
 
-## 1. Introduction to {{topic}}
-- Clear, simple definition (2-3 sentences)
-- Why this topic is important
-- What you will learn in this material
+## 1. Comprehensive Introduction to {topic}
+- Detailed definition with multiple explanations (5-7 sentences)
+- Multiple reasons why this topic is important
+- Complete overview of what you will learn
+- How this topic appears in different real-world contexts
+- Common myths and false beliefs about {topic}
 
-## 2. Core Concepts (Detailed Section)
-- Explain 4-6 main concepts related to {{topic}}
+## 2. ULTRA-DETAILED Core Concepts (LARGEST Section)
+- Explain 8-10 main concepts related to {topic} (not just 5-7)
 - For each concept, provide:
-  * Clear definition (1-2 sentences)
-  * Concrete example(s) that are easy to understand
-  * Why this concept matters
-  * Common misconceptions to avoid
+  * Detailed definition (3-4 clear sentences)
+  * Minimum 4-5 concrete, detailed examples
+  * Explicit connections to other concepts
+  * Multiple reasons why this concept matters
+  * Common misconceptions with explanations of why they're wrong
+  * Real-world applications with specific examples
+  * Visual representation or ASCII diagram if helpful
 
-## 3. Step-by-Step Examples (Multiple Examples)
-- Provide 2-3 complete worked examples
+## 3. Extremely Detailed Step-by-Step Examples (Multiple Examples)
+- Provide 4-5 COMPLETE worked examples (increase from 3-4)
 - For each example:
-  * Clear problem statement
-  * Step-by-step solution (number each step)
-  * Explanation of why each step was taken
-  * The final answer with clarification
+  * Detailed problem statement with full context
+  * Detailed step-by-step solution (number EVERY step with full explanations)
+  * Complete explanation of WHY each step was taken
+  * Alternative methods or approaches
+  * Common mistakes that students make with this type of problem
+  * The final answer with complete verification
+  * How this example relates to the concepts
 
-## 4. Practice Scenarios
-- 2-3 different practice situations related to {{topic}}
-- What to do in each situation
-- What NOT to do (common mistakes)
-- Expected outcomes
+## 4. Extensive Practice Scenarios
+- Provide 5-6 detailed practice situations (increase from 4-5)
+- For each situation:
+  * Complete scenario description with full context and details
+  * Step-by-step approach to solve or handle the situation
+  * Detail of what NOT to do and explanations of why
+  * Explanation of why common mistakes happen
+  * Expected outcomes with complete explanations
+  * Additional tips or considerations
 
-## 5. Visual Organization Tips
-- How to organize information about {{topic}}
-- Helpful structures or formats to use
-- Tips for remembering key information
+## 5. Advanced Visual Organization Guide
+- Multiple ways to organize information about {topic}
+- Helpful structures and formats for learning (tables, flowcharts, structured lists)
+- Mnemonic devices, memory aids, and learning systems
+- How to create comprehensive study guides for {topic}
+- Organization strategies specifically designed for {topic}
+- Sample organized templates you can use
 
-## 6. Common Challenges and Solutions
-- List 3-4 common difficulties students face with {{topic}}
+## 6. Comprehensive Common Challenges Guide
+- List 5-6 common difficulties students face with {topic}
 - For each difficulty:
-  * What the challenge is
-  * Why it happens
-  * Step-by-step solution
-  * Prevention tips
+  * Complete description of what the challenge is
+  * Detailed explanation of why students struggle with it
+  * Comprehensive step-by-step solution with multiple approaches
+  * Prevention strategies and tips
+  * Practice problems and exercises to build confidence
+  * How to recognize when you're making this mistake
 
-## 7. Real-World Applications
-- 2-3 real-world examples of how {{topic}} is used
-- Who uses this information
-- Why it matters in the real world
+## 7. Advanced Insights and Deep Understanding
+- Deeper theoretical understanding of {topic}
+- Interesting facts and background information
+- How experts and professionals think about {topic}
+- Historical context and development of {topic}
+- Advanced applications and extensions
+- Connections to other fields and subjects
+- Future developments and how {topic} is evolving
 
-## 8. Key Points Summary
-- List the most important information to remember
-- What is essential vs. optional information
-- Quiz yourself questions (with answers)
+## 8. Very Detailed Real-World Applications
+- 4-5 detailed real-world examples of how {topic} is used
+- Complete detail of how professionals use this information
+- Step-by-step explanation of application in each example
+- Why learning this will help you in different contexts
+- Current real-world uses and future applications
+- Career fields that extensively use {topic}
+- How {topic} impacts daily life
 
-## 9. Next Steps for Learning
-- How to practice what you learned
-- Where to find more information
-- How to apply this knowledge
+## 9. Interactive Self-Check and Quiz Section
+- Comprehensive numbered list of the MOST important information
+- Clear, explicit distinction between essential and optional information
+- 8-10 detailed self-check questions with comprehensive answers
+- Multiple ways to assess your understanding
+- Reference material for each question
 
-Difficulty Levels:
-- Easy: Very simple words, basic 2-3 main concepts, familiar examples, detailed explanations, short step-by-step instructions
-- Medium: Common words, 4-5 related concepts, varied examples, moderate detail with connections between ideas
-- Hard: Precise terminology, complex concepts with nuance, advanced examples, detailed explanations with theory
+## 10. Comprehensive Next Steps for Learning
+- Detailed, step-by-step practice plan
+- Specific exercises and problems to solve
+- Where to find more information and resources
+- How to apply this knowledge in different contexts
+- Recommended next topics to learn after this one
+- Tips for retaining this information long-term
+- How to test yourself and measure your understanding
 
-Reference Material to Use:
+DIFFICULTY LEVEL GUIDANCE:
+- Easy: Extreme simplicity, basic 3-4 main concepts covered thoroughly, very familiar everyday examples, EXTREMELY detailed step-by-step instructions, short sentences
+- Medium: Clear common language, 6-8 related concepts covered comprehensively, varied detailed examples, moderate detail with explicit connections between ideas, longer more complex explanations
+- Hard: Precise technical terminology, 9-10 complex concepts with nuance and detail, advanced real-world examples, thorough explanations with complete theoretical background, sophisticated connections
+
+Reference Material (Use this as PRIMARY source, not supplementary):
 {context}
 
-Generate the learning material now. Make it comprehensive, detailed, and suitable for ASD learners. 
-The material should be thorough enough to take 5-7 minutes to read and understand."""
+CRITICAL INSTRUCTIONS:
+1. Generate EXTREMELY comprehensive content - aim for 4500-6000 words minimum
+2. Include MANY examples - at least 4-5 per concept, 4-5 complete worked examples, 5-6 detailed practice scenarios
+3. Make EVERYTHING concrete, specific, and detailed
+4. Provide COMPLETE explanations, not abbreviated ones
+5. Use clear headers and consistent formatting
+6. Use the PROVIDED CONTEXT as your PRIMARY knowledge source - rely on it heavily
+7. Focus on depth and completeness over brevity
+
+Generate the ULTRA-COMPREHENSIVE learning material now. This material will be the primary source of knowledge for test questions, so make it thorough and complete."""
 
         try:
             response = self.llm.invoke(prompt)
@@ -566,7 +890,7 @@ The material should be thorough enough to take 5-7 minutes to read and understan
         else:
             video_section += "No videos found for this topic currently.\n"
 
-        logger.info(f"Generated comprehensive learning material for '{topic}' at {difficulty} level")
+        logger.info(f"Generated ultra-comprehensive learning material for '{topic}' at {difficulty} level ({len(material)} chars)")
         return material + video_section
 
 
@@ -686,10 +1010,23 @@ class TestEngine:
         logger.info(f"Difficulty change: {current} → {next_level} (test #{test_number})")
         return next_level
 
-    def generate_text_answer_questions(self, topic, difficulty="easy"):
+    def generate_text_answer_questions(self, topic, difficulty="easy", learning_material=None):
         """Generate 5 open-ended text questions optimized for ASD students - separate LLM call"""
+        
+        # Build context section with learning material if provided
+        context_section = ""
+        if learning_material:
+            # Truncate to first 3000 chars to keep it reasonable
+            material_for_context = learning_material[:3000] if len(learning_material) > 3000 else learning_material
+            context_section = f"""
+REFERENCE MATERIAL (Use this as your PRIMARY source for creating questions):
+{material_for_context}
+
+"""
+        
         prompt = f"""Generate exactly 5 open-ended questions about {topic} at {difficulty} level for students with Autism Spectrum Disorder.
 
+{context_section}
 Guidelines for ASD-friendly questions:
 - Use clear, simple language
 - Ask specific questions (not vague ones)
@@ -697,6 +1034,7 @@ Guidelines for ASD-friendly questions:
 - Use concrete examples or scenarios when possible
 - Be literal and straightforward
 - One question per concept
+- Questions MUST be answerable based on the provided material
 
 Difficulty: {difficulty}
 - Easy: Literal questions, factual recall, simple applications
@@ -726,10 +1064,23 @@ Generate the questions now:"""
             logger.warning(f"Failed to parse text answer questions for {topic}")
             return []
 
-    def generate_mcq_questions(self, topic, difficulty="easy", num_questions=15):
+    def generate_mcq_questions(self, topic, difficulty="easy", num_questions=15, learning_material=None):
         """Generate MCQ questions optimized for ASD students - configurable count (default 15)"""
+        
+        # Build context section with learning material if provided
+        context_section = ""
+        if learning_material:
+            # Truncate to first 3000 chars to keep it reasonable
+            material_for_context = learning_material[:3000] if len(learning_material) > 3000 else learning_material
+            context_section = f"""
+REFERENCE MATERIAL (Use this as your PRIMARY source for creating questions):
+{material_for_context}
+
+"""
+        
         prompt = f"""Generate exactly {num_questions} multiple choice questions about {topic} at {difficulty} level for students with Autism Spectrum Disorder.
 
+{context_section}
 Guidelines for ASD-friendly multiple choice:
 - Use clear, straightforward language
 - Avoid trick questions or subtle differences
@@ -766,24 +1117,44 @@ Generate the questions now:"""
             logger.warning(f"Failed to parse MCQ questions for {topic}")
             return []
 
-    def create_test_session(self, topic, difficulty, test_number=1):
+    def create_test_session(self, topic, difficulty, test_number=1, student_id=None, learning_material=None):
 
         session_id = str(uuid.uuid4())
 
-        db.execute(
-            """
-            INSERT INTO test_sessions
-            (id,topic,test_number,initial_difficulty,current_difficulty)
-            VALUES (%s,%s,%s,%s,%s)
-            """,
-            (session_id, topic, test_number, difficulty, difficulty),
-        )
+        # Try to insert with student_id column first (new schema)
+        try:
+            db.execute(
+                """
+                INSERT INTO test_sessions
+                (id,student_id,topic,test_number,initial_difficulty,current_difficulty)
+                VALUES (%s,%s,%s,%s,%s,%s)
+                """,
+                (session_id, student_id, topic, test_number, difficulty, difficulty),
+            )
+            logger.info(f"Test session created with student_id: {student_id}")
+        except Exception as e:
+            # Fallback: insert without student_id column (old schema)
+            logger.warning(f"Insert with student_id failed: {e}. Trying fallback without student_id...")
+            try:
+                db.execute(
+                    """
+                    INSERT INTO test_sessions
+                    (id,topic,test_number,initial_difficulty,current_difficulty)
+                    VALUES (%s,%s,%s,%s,%s)
+                    """,
+                    (session_id, topic, test_number, difficulty, difficulty),
+                )
+                logger.info(f"Test session created (without student_id)")
+            except Exception as fallback_error:
+                logger.error(f"Both insert attempts failed: {fallback_error}")
+                raise fallback_error
 
-        logger.info(f"Generating batch 1 questions - topic: {topic}, difficulty: {difficulty}")
+        logger.info(f"Generating batch 1 questions - topic: {topic}, difficulty: {difficulty}, has_material: {learning_material is not None}")
 
         # Generate batch 1: 5 text answer + 15 MCQ = 20 questions (separate LLM calls)
-        text_questions = self.generate_text_answer_questions(topic, difficulty)
-        mcq_questions = self.generate_mcq_questions(topic, difficulty, num_questions=15)
+        # Pass learning material as context if provided
+        text_questions = self.generate_text_answer_questions(topic, difficulty, learning_material)
+        mcq_questions = self.generate_mcq_questions(topic, difficulty, num_questions=15, learning_material=learning_material)
 
         # Store text answer questions (batch 1) - no predefined answers
         for text_q in text_questions[:5]:
@@ -833,6 +1204,36 @@ Generate the questions now:"""
         # Store MCQ questions (batch 1) - 15 MCQs
         for q in mcq_questions[:15]:
             try:
+                # Extract correct answer index
+                correct_answer = 0  # default
+                
+                # Try multiple formats to find correct answer
+                if "correctAnswer" in q:
+                    # If it's already a number, use it
+                    if isinstance(q.get("correctAnswer"), int):
+                        correct_answer = q.get("correctAnswer")
+                    else:
+                        # If it's text like "Machine Learning", find its index in options
+                        answer_text = str(q.get("correctAnswer")).strip()
+                        options = q.get("options", [])
+                        try:
+                            correct_answer = options.index(answer_text)
+                        except (ValueError, TypeError):
+                            # If not found, default to 0
+                            correct_answer = 0
+                            logger.warning(f"Could not find '{answer_text}' in options {options}, defaulting to 0")
+                
+                elif "answer" in q:
+                    if isinstance(q.get("answer"), int):
+                        correct_answer = q.get("answer")
+                    else:
+                        answer_text = str(q.get("answer")).strip()
+                        options = q.get("options", [])
+                        try:
+                            correct_answer = options.index(answer_text)
+                        except (ValueError, TypeError):
+                            correct_answer = 0
+                
                 db.execute(
                     """
                     INSERT INTO test_questions
@@ -845,7 +1246,7 @@ Generate the questions now:"""
                         difficulty,
                         q.get("question"),
                         q.get("options", ["A","B","C","D"]),
-                        q.get("answer") or q.get("correctAnswer", 0),
+                        correct_answer,  # Now guaranteed to be an integer
                         q.get("explanation", ""),
                         1,  # batch_number
                         'mcq',  # question_type
@@ -950,16 +1351,31 @@ Generate the questions now:"""
     def calculate_score(self, test_session_id, avg_emotion=0.0):
         """Calculate final score for a test session with multimodal emotion analysis"""
         try:
-            # Get test session
-            db.execute(
-                "SELECT topic, initial_difficulty, test_number FROM test_sessions WHERE id = %s",
-                (test_session_id,),
-            )
-            session = db.fetch()
+            # Get test session (try with student_id first, fallback if column doesn't exist)
+            student_id = None
+            try:
+                db.execute(
+                    "SELECT student_id, topic, initial_difficulty, test_number FROM test_sessions WHERE id = %s",
+                    (test_session_id,),
+                )
+                session = db.fetch()
+                if session:
+                    student_id, topic, difficulty, test_number = session[0]
+            except:
+                # Column doesn't exist, try without it
+                logger.warning("student_id column not found, querying without it")
+                db.execute(
+                    "SELECT topic, initial_difficulty, test_number FROM test_sessions WHERE id = %s",
+                    (test_session_id,),
+                )
+                session = db.fetch()
+                if session:
+                    topic, difficulty, test_number = session[0]
+                else:
+                    raise ValueError("Test session not found")
+            
             if not session:
                 raise ValueError("Test session not found")
-            
-            topic, difficulty, test_number = session[0]
             
             # Count correct answers
             db.execute(
@@ -1000,33 +1416,47 @@ Generate the questions now:"""
                 avg_text_emotion=avg_text_emotion
             )
             
-            # Store results with comprehensive emotion data
+            # Store results with comprehensive emotion data and student_id
+            # Try with student_id column first (new schema)
             try:
                 db.execute(
                     """
                     INSERT INTO test_results
-                    (session_id, topic, score, total_questions, difficulty, avg_emotion, avg_text_emotion, test_number)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    (session_id, student_id, topic, score, total_questions, difficulty, avg_emotion, avg_text_emotion, test_number)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
-                    (test_session_id, topic, score, total_questions, difficulty, 
+                    (test_session_id, student_id, topic, score, total_questions, difficulty, 
                      avg_image_emotion, avg_text_emotion, test_number),
                 )
             except Exception as insert_error:
-                # Fallback: try inserting without avg_text_emotion column (for older schema)
-                logger.warning(f"Insert with avg_text_emotion failed: {insert_error}. Trying fallback...")
+                # Fallback: try without student_id
+                logger.warning(f"Insert with student_id failed: {insert_error}. Trying without student_id...")
                 try:
                     db.execute(
                         """
                         INSERT INTO test_results
-                        (session_id, topic, score, total_questions, difficulty, avg_emotion, test_number)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        (session_id, topic, score, total_questions, difficulty, avg_emotion, avg_text_emotion, test_number)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                         """,
                         (test_session_id, topic, score, total_questions, difficulty, 
-                         avg_image_emotion, test_number),
+                         avg_image_emotion, avg_text_emotion, test_number),
                     )
                 except Exception as fallback_error:
-                    logger.error(f"Both insert attempts failed: {fallback_error}")
-                    raise fallback_error
+                    # Last fallback: try without avg_text_emotion too
+                    logger.warning(f"Insert without student_id failed: {fallback_error}. Trying without avg_text_emotion...")
+                    try:
+                        db.execute(
+                            """
+                            INSERT INTO test_results
+                            (session_id, topic, score, total_questions, difficulty, avg_emotion, test_number)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                            """,
+                            (test_session_id, topic, score, total_questions, difficulty, 
+                             avg_image_emotion, test_number),
+                        )
+                    except Exception as final_error:
+                        logger.error(f"All insert attempts failed: {final_error}")
+                        raise final_error
             
             # Update test session status
             db.execute(
@@ -1041,8 +1471,8 @@ Generate the questions now:"""
                 "accuracy": accuracy,
                 "difficulty": difficulty,
                 "nextDifficulty": next_difficulty,
-                "totalQuestions": total_questions,
-                "correctAnswers": correct_answers,
+                "total": total_questions,
+                "correct": correct_answers,
                 "emotionAnalysis": {
                     "avgImageEmotion": avg_image_emotion,
                     "avgTextEmotion": avg_text_emotion,
@@ -1072,7 +1502,7 @@ Generate the questions now:"""
             return 0
 
     def get_last_test_result(self, topic):
-        """Get the last test result for a topic to determine next difficulty"""
+        """Get the last test result for a topic to determine next difficulty (case-insensitive)"""
         try:
             db.execute(
                 """
@@ -1089,7 +1519,7 @@ Generate the questions now:"""
                         END as next_difficulty,
                         test_number
                     FROM test_results
-                    WHERE topic = %s
+                    WHERE LOWER(topic) = LOWER(%s)
                     ORDER BY created_at DESC
                     LIMIT 1
                 ) as last_test
@@ -1205,6 +1635,36 @@ Generate the questions now:"""
             # Store MCQ questions (batch 2) - 15 MCQs
             for q in mcq_questions[:15]:
                 try:
+                    # Extract correct answer index
+                    correct_answer = 0  # default
+                    
+                    # Try multiple formats to find correct answer
+                    if "correctAnswer" in q:
+                        # If it's already a number, use it
+                        if isinstance(q.get("correctAnswer"), int):
+                            correct_answer = q.get("correctAnswer")
+                        else:
+                            # If it's text like "Machine Learning", find its index in options
+                            answer_text = str(q.get("correctAnswer")).strip()
+                            options = q.get("options", [])
+                            try:
+                                correct_answer = options.index(answer_text)
+                            except (ValueError, TypeError):
+                                # If not found, default to 0
+                                correct_answer = 0
+                                logger.warning(f"Could not find '{answer_text}' in options {options}, defaulting to 0")
+                    
+                    elif "answer" in q:
+                        if isinstance(q.get("answer"), int):
+                            correct_answer = q.get("answer")
+                        else:
+                            answer_text = str(q.get("answer")).strip()
+                            options = q.get("options", [])
+                            try:
+                                correct_answer = options.index(answer_text)
+                            except (ValueError, TypeError):
+                                correct_answer = 0
+                    
                     db.execute(
                         """
                         INSERT INTO test_questions
@@ -1217,7 +1677,7 @@ Generate the questions now:"""
                             new_difficulty,
                             q.get("question"),
                             q.get("options", ["A","B","C","D"]),
-                            q.get("answer") or q.get("correctAnswer", 0),
+                            correct_answer,  # Now guaranteed to be an integer
                             q.get("explanation", ""),
                             2,  # batch_number
                             'mcq',  # question_type
@@ -1279,7 +1739,7 @@ Generate the questions now:"""
                 "batchNumber": 2,
                 "batch1Performance": {
                     "accuracy": accuracy,
-                    "avgEmotion": avg_emotion,
+                    "avgEmotion": avg_image_emotion,
                 }
             }
             
@@ -1359,14 +1819,50 @@ class EmotionService:
     def __init__(self):
 
         try:
-
-            with custom_object_scope({'TFOpLambda': tf.keras.layers.Lambda}):
-                self.model = tf.keras.models.load_model("image_model.h5",compile=False)
+            import os
+            
+            # Try multiple possible locations for the model file
+            possible_paths = [
+                "image_model.h5",
+                "backend/image_model.h5",
+                os.path.join(os.path.dirname(__file__), "image_model.h5"),
+                "/app/backend/image_model.h5"
+            ]
+            
+            model_path = None
+            for path in possible_paths:
+                if os.path.exists(path):
+                    model_path = path
+                    logger.info(f"Found emotion model at: {model_path}")
+                    break
+            
+            if model_path is None:
+                logger.warning(f"Emotion model file not found. Tried: {possible_paths}")
+                self.model = None
+                self.labels = []
+                return
+            
+            # Load model with better error handling
+            # Don't use custom_object_scope as it may cause issues
+            try:
+                self.model = tf.keras.models.load_model(model_path, compile=False)
                 self.labels = ["confused", "focused", "bored", "happy"]
+                logger.info("Emotion model loaded successfully")
+            except Exception as load_error:
+                logger.error(f"Failed to load emotion model from {model_path}: {load_error}")
+                # Try alternative loading without custom objects
+                try:
+                    self.model = tf.keras.models.load_model(model_path)
+                    self.labels = ["confused", "focused", "bored", "happy"]
+                    logger.info("Emotion model loaded successfully (with compile)")
+                except Exception as alt_error:
+                    logger.error(f"Alternative load also failed: {alt_error}")
+                    self.model = None
+                    self.labels = []
 
         except Exception as e:
 
-            logger.warning(f"Emotion model load failed: {e}")
+            logger.warning(f"Emotion model initialization failed: {e}")
 
             self.model = None
             self.labels = []

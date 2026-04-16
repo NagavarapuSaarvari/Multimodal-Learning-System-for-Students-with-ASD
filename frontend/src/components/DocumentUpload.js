@@ -1,8 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { uploadDocument, uploadYouTube, getDocuments, deleteDocument } from "../services/api";
 import { UploadCloud, FileText, Trash2, Youtube, Link as LinkIcon, AlertCircle } from "lucide-react";
-import { useNavigate } from "react-router-dom";
-
+import { useNavigate } from "react-router-dom";import toast from "react-hot-toast";
 function DocumentUpload() {
 
   const [file, setFile] = useState(null);
@@ -59,7 +58,7 @@ function DocumentUpload() {
   };
 
   const validateYoutubeUrl = (url) => {
-    const youtubeRegex = /^(https?:\/\/)?(www\.)?(youtube|youtu|youtube-nocookie)\.(com|be)\//;
+    const youtubeRegex = /(youtube|youtu|youtube-nocookie)\.(com|be)/i;
     return youtubeRegex.test(url);
   };
 
@@ -74,12 +73,14 @@ function DocumentUpload() {
       setLoading(true);
       setError("");
       await uploadDocument(file);
-      alert("Document uploaded successfully");
+      toast.success("Document uploaded successfully");
       setFile(null);
       fetchDocuments(); // Refresh list
     } catch (err) {
       console.error(err);
-      setError(err.message || "Upload failed");
+      const errorMsg = err.message || "Upload failed";
+      setError(errorMsg);
+      toast.error(errorMsg);
     } finally {
       setLoading(false);
     }
@@ -104,12 +105,14 @@ function DocumentUpload() {
       setLoading(true);
       setError("");
       await uploadYouTube(youtubeUrl);
-      alert("YouTube video added successfully");
+      toast.success("YouTube video added successfully");
       setYoutubeUrl("");
       fetchDocuments(); // Refresh list
     } catch (err) {
       console.error(err);
-      setError(err.message || "YouTube upload failed");
+      const errorMsg = err.message || "YouTube upload failed";
+      setError(errorMsg);
+      toast.error(errorMsg);
     } finally {
       setLoading(false);
     }
@@ -382,40 +385,6 @@ function DocumentUpload() {
               </div>
             </div>
           </div>
-        </div>
-
-        {/* Info Section */}
-        <div className="mt-12 bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-2xl p-8 max-w-2xl mx-auto">
-          <h3 className="text-xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-            <span className="text-2xl">💡</span>
-            How Learning Materials are Generated
-          </h3>
-          <p className="text-gray-700 leading-relaxed mb-4">
-            When you enter a topic, our system uses <strong>Retrieval Augmented Generation (RAG)</strong> to:
-          </p>
-          <ol className="space-y-2 text-gray-700">
-            <li className="flex gap-3">
-              <span className="font-bold text-blue-600 flex-shrink-0">1.</span>
-              <span>Search across all your uploaded PDFs and YouTube transcripts</span>
-            </li>
-            <li className="flex gap-3">
-              <span className="font-bold text-blue-600 flex-shrink-0">2.</span>
-              <span>Find the most relevant content using AI semantic search</span>
-            </li>
-            <li className="flex gap-3">
-              <span className="font-bold text-blue-600 flex-shrink-0">3.</span>
-              <span>Generate personalized, ASD-optimized learning materials using your content</span>
-            </li>
-            <li className="flex gap-3">
-              <span className="font-bold text-blue-600 flex-shrink-0">4.</span>
-              <span>Create adaptive tests based on the generated materials</span>
-            </li>
-          </ol>
-          <p className="text-sm text-gray-600 mt-4 pt-4 border-t border-blue-200">
-            ✓ Both PDFs and YouTube transcripts are analyzed together<br/>
-            ✓ Your personal materials make learning more relevant<br/>
-            ✓ Content is optimized for students with autism spectrum disorder
-          </p>
         </div>
       </div>
     </div>

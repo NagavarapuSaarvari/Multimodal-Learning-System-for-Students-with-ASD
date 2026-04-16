@@ -1,19 +1,33 @@
+"""
+Database initialization and schema setup for Multimodal Learning System
+Clean, properly designed schema with all relationships
+"""
+
+import logging
 from database import db
+
+logger = logging.getLogger(__name__)
 
 
 class DatabaseSetup:
 
     def create_extensions(self):
-
-        db.execute(
-            "CREATE EXTENSION IF NOT EXISTS vector;"
-        )
+        """Create required PostgreSQL extensions"""
+        try:
+            db.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+            logger.info("✓ Vector extension ready")
+        except Exception as e:
+            logger.warning(f"Vector extension: {e}")
 
     def create_tables(self):
+        """Create all database tables with proper relationships"""
 
-        # Create admins table
+        # ========================
+        # CORE USER TABLES
+        # ========================
+
         db.execute("""
-        CREATE TABLE IF NOT EXISTS admins(
+        CREATE TABLE IF NOT EXISTS admins (
             id UUID PRIMARY KEY,
             google_id TEXT UNIQUE,
             email TEXT UNIQUE,
@@ -23,23 +37,26 @@ class DatabaseSetup:
         );
         """)
 
-        # Create students table
         db.execute("""
-        CREATE TABLE IF NOT EXISTS students(
+        CREATE TABLE IF NOT EXISTS students (
             id UUID PRIMARY KEY,
-            admin_id UUID REFERENCES admins(id) ON DELETE CASCADE,
+            admin_id UUID NOT NULL REFERENCES admins(id) ON DELETE CASCADE,
             name TEXT NOT NULL,
-            date_of_birth DATE NOT NULL,
+            date_of_birth DATE,
             age INT,
             created_at TIMESTAMP DEFAULT NOW()
         );
         """)
 
+        # ========================
+        # LEARNING MATERIALS
+        # ========================
+
         db.execute("""
-        CREATE TABLE IF NOT EXISTS documents(
+        CREATE TABLE IF NOT EXISTS documents (
             id UUID PRIMARY KEY,
-            admin_id UUID REFERENCES admins(id) ON DELETE CASCADE,
-            filename TEXT,
+            admin_id UUID NOT NULL REFERENCES admins(id) ON DELETE CASCADE,
+            filename TEXT NOT NULL,
             file_type TEXT DEFAULT 'pdf',
             source_url TEXT,
             uploaded_at TIMESTAMP DEFAULT NOW()
@@ -47,220 +64,217 @@ class DatabaseSetup:
         """)
 
         db.execute("""
-        CREATE TABLE IF NOT EXISTS document_chunks(
+        CREATE TABLE IF NOT EXISTS document_chunks (
             id UUID PRIMARY KEY,
-            document_id UUID REFERENCES documents(id),
-            content TEXT,
+            document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+            content TEXT NOT NULL,
             embedding VECTOR(384)
         );
         """)
 
         db.execute("""
-        CREATE TABLE IF NOT EXISTS learning_memory(
+        CREATE TABLE IF NOT EXISTS youtube_sources (
             id SERIAL PRIMARY KEY,
-            student_id UUID REFERENCES students(id) ON DELETE CASCADE,
-            topic TEXT,
-            score INT,
-            difficulty TEXT DEFAULT 'easy',
-            created_at TIMESTAMP DEFAULT NOW()
-        );
-        """)
-
-        db.execute("""
-        CREATE TABLE IF NOT EXISTS test_sessions(
-            id UUID PRIMARY KEY,
-            student_id UUID REFERENCES students(id) ON DELETE CASCADE,
-            topic TEXT,
-            test_number INT DEFAULT 1,
-            initial_difficulty TEXT DEFAULT 'easy',
-            current_difficulty TEXT DEFAULT 'easy',
-            status TEXT DEFAULT 'in_progress',
-            created_at TIMESTAMP DEFAULT NOW(),
-            completed_at TIMESTAMP
-        );
-        """)
-
-        db.execute("""
-        CREATE TABLE IF NOT EXISTS test_results(
-            id SERIAL PRIMARY KEY,
-            session_id UUID REFERENCES test_sessions(id),
-            student_id UUID REFERENCES students(id) ON DELETE CASCADE,
-            topic TEXT,
-            score INT,
-            total_questions INT,
-            difficulty TEXT,
-            avg_emotion FLOAT DEFAULT 0.0,
-            avg_text_emotion FLOAT DEFAULT 0.0,
-            test_number INT DEFAULT 1,
-            created_at TIMESTAMP DEFAULT NOW()
-        );
-        """)
-
-        db.execute("""
-        CREATE TABLE IF NOT EXISTS test_questions(
-            id SERIAL PRIMARY KEY,
-            session_id UUID REFERENCES test_sessions(id),
-            student_id UUID REFERENCES students(id) ON DELETE CASCADE,
-            topic TEXT,
-            difficulty TEXT,
-            question TEXT,
-            options TEXT[],
-            correct_answer INT,
-            explanation TEXT,
-            batch_number INT DEFAULT 1,
-            created_at TIMESTAMP DEFAULT NOW()
-        );
-        """)
-
-        db.execute("""
-        CREATE TABLE IF NOT EXISTS user_test_answers(
-            id SERIAL PRIMARY KEY,
-            test_session_id UUID REFERENCES test_sessions(id),
-            question_id INT REFERENCES test_questions(id),
-            user_answer INT,
-            answer_text TEXT,
-            is_correct BOOLEAN,
-            created_at TIMESTAMP DEFAULT NOW()
-        );
-        """)
-
-        db.execute("""
-        CREATE TABLE IF NOT EXISTS test_emotions(
-            id SERIAL PRIMARY KEY,
-            session_id UUID REFERENCES test_sessions(id),
-            student_id UUID REFERENCES students(id) ON DELETE CASCADE,
-            emotion TEXT,
-            emotion_type TEXT DEFAULT 'image',
-            confidence FLOAT,
-            captured_at TIMESTAMP DEFAULT NOW()
-        );
-        """)
-
-        # Add YouTube sources table for tracking
-        db.execute("""
-        CREATE TABLE IF NOT EXISTS youtube_sources(
-            id SERIAL PRIMARY KEY,
-            document_id UUID REFERENCES documents(id),
-            video_id TEXT,
-            url TEXT,
+            document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+            video_id TEXT UNIQUE,
+            url TEXT NOT NULL,
             title TEXT,
             transcript_chunks INT DEFAULT 0,
             added_at TIMESTAMP DEFAULT NOW()
         );
         """)
 
-    def create_similarity_function(self):
+        # ========================
+        # TEST MANAGEMENT
+        # ========================
 
         db.execute("""
-        CREATE OR REPLACE FUNCTION match_documents(
-        query_embedding VECTOR(384),
-        match_count INT
-        )
-        RETURNS TABLE(
-            content TEXT,
-            similarity FLOAT
-        )
-        LANGUAGE SQL
-        AS $$
-
-        SELECT
-        content,
-        1 - (embedding <=> query_embedding) AS similarity
-        FROM document_chunks
-        ORDER BY embedding <=> query_embedding
-        LIMIT match_count;
-
-        $$;
+        CREATE TABLE IF NOT EXISTS test_sessions (
+            id UUID PRIMARY KEY,
+            student_id UUID NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+            topic TEXT NOT NULL,
+            test_number INT DEFAULT 1,
+            initial_difficulty TEXT DEFAULT 'easy',
+            status TEXT DEFAULT 'in_progress',
+            created_at TIMESTAMP DEFAULT NOW(),
+            completed_at TIMESTAMP,
+            CONSTRAINT unique_student_topic_test UNIQUE(student_id, topic, test_number)
+        );
         """)
 
+        db.execute("""
+        CREATE TABLE IF NOT EXISTS test_questions (
+            id SERIAL PRIMARY KEY,
+            session_id UUID NOT NULL REFERENCES test_sessions(id) ON DELETE CASCADE,
+            question_number INT NOT NULL,
+            question_type TEXT NOT NULL CHECK (question_type IN ('text', 'mcq')),
+            question TEXT NOT NULL,
+            options TEXT[],
+            correct_answer INT,
+            explanation TEXT,
+            difficulty TEXT DEFAULT 'easy',
+            created_at TIMESTAMP DEFAULT NOW()
+        );
+        """)
+
+        db.execute("""
+        CREATE TABLE IF NOT EXISTS user_test_answers (
+            id SERIAL PRIMARY KEY,
+            session_id UUID NOT NULL REFERENCES test_sessions(id) ON DELETE CASCADE,
+            question_number INT NOT NULL,
+            answer_type TEXT NOT NULL CHECK (answer_type IN ('text', 'mcq')),
+            user_answer TEXT,
+            answer_index INT,
+            is_correct BOOLEAN DEFAULT FALSE,
+            score FLOAT DEFAULT 0.0,
+            feedback TEXT,
+            submitted_at TIMESTAMP DEFAULT NOW()
+        );
+        """)
+
+        # ========================
+        # TEST RESULTS & SCORING
+        # ========================
+
+        db.execute("""
+        CREATE TABLE IF NOT EXISTS test_results (
+            id SERIAL PRIMARY KEY,
+            session_id UUID NOT NULL REFERENCES test_sessions(id) ON DELETE CASCADE,
+            student_id UUID NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+            topic TEXT NOT NULL,
+            test_number INT DEFAULT 1,
+            score INT NOT NULL,
+            total_questions INT NOT NULL,
+            correct_answers INT NOT NULL,
+            difficulty TEXT NOT NULL,
+            avg_emotion FLOAT DEFAULT 0.0,
+            avg_text_emotion FLOAT DEFAULT 0.0,
+            started_at TIMESTAMP NOT NULL,
+            completed_at TIMESTAMP NOT NULL,
+            created_at TIMESTAMP DEFAULT NOW()
+        );
+        """)
+
+        # ========================
+        # EMOTION TRACKING
+        # ========================
+
+        db.execute("""
+        CREATE TABLE IF NOT EXISTS test_emotions (
+            id SERIAL PRIMARY KEY,
+            session_id UUID NOT NULL REFERENCES test_sessions(id) ON DELETE CASCADE,
+            emotion TEXT NOT NULL,
+            emotion_type TEXT NOT NULL CHECK (emotion_type IN ('image', 'text')),
+            confidence FLOAT DEFAULT 0.0,
+            question_number INT,
+            captured_at TIMESTAMP DEFAULT NOW()
+        );
+        """)
+
+        # ========================
+        # LEARNING MEMORY & PROGRESS
+        # ========================
+
+        db.execute("""
+        CREATE TABLE IF NOT EXISTS learning_memory (
+            id SERIAL PRIMARY KEY,
+            student_id UUID NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+            topic TEXT NOT NULL,
+            last_score INT,
+            last_difficulty TEXT,
+            test_count INT DEFAULT 0,
+            avg_score FLOAT,
+            last_tested_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT NOW(),
+            CONSTRAINT unique_student_topic UNIQUE(student_id, topic)
+        );
+        """)
+
+        logger.info("✓ All tables created successfully")
+
+
+    def create_similarity_function(self):
+        """Create vector similarity search function"""
+        try:
+            db.execute("""
+            CREATE OR REPLACE FUNCTION match_documents(
+                query_embedding VECTOR(384),
+                match_count INT
+            )
+            RETURNS TABLE(
+                content TEXT,
+                similarity FLOAT
+            )
+            LANGUAGE SQL
+            AS $$
+                SELECT
+                    content,
+                    1 - (embedding <=> query_embedding) AS similarity
+                FROM document_chunks
+                ORDER BY embedding <=> query_embedding
+                LIMIT match_count;
+            $$;
+            """)
+            logger.info("✓ Similarity function created")
+        except Exception as e:
+            logger.warning(f"Similarity function: {e}")
+
     def migrate_add_missing_columns(self):
-        """Safely add missing columns to existing tables"""
-        # Add avg_text_emotion to test_results if missing
-        try:
-            db.execute("""
-            ALTER TABLE test_results
-            ADD COLUMN avg_text_emotion FLOAT DEFAULT 0.0;
-            """)
-            print("✓ Added avg_text_emotion column to test_results")
-        except Exception as e:
-            print(f"avg_text_emotion column already exists or error: {e}")
+        """Add missing columns for backward compatibility"""
+        migrations = [
+            ("test_sessions", "student_id", "ALTER TABLE test_sessions ADD COLUMN student_id UUID REFERENCES students(id) ON DELETE CASCADE"),
+            ("test_results", "avg_emotion", "ALTER TABLE test_results ADD COLUMN avg_emotion FLOAT DEFAULT 0.0"),
+            ("test_results", "avg_text_emotion", "ALTER TABLE test_results ADD COLUMN avg_text_emotion FLOAT DEFAULT 0.0"),
+            ("test_results", "student_id", "ALTER TABLE test_results ADD COLUMN student_id UUID REFERENCES students(id) ON DELETE CASCADE"),
+        ]
 
-        # Add emotion_type to test_emotions if missing
-        try:
-            db.execute("""
-            ALTER TABLE test_emotions
-            ADD COLUMN emotion_type TEXT DEFAULT 'image';
-            """)
-            print("✓ Added emotion_type column to test_emotions")
-        except Exception as e:
-            print(f"emotion_type column already exists or error: {e}")
+        for table, column, migration_sql in migrations:
+            try:
+                db.execute(f"SELECT 1 FROM information_schema.columns WHERE table_name='{table}' AND column_name='{column}'")
+                if not db.fetch():
+                    db.execute(migration_sql)
+                    logger.info(f"✓ Added {column} to {table}")
+            except Exception as e:
+                logger.debug(f"Migration {table}.{column}: {e}")
 
-        # Add answer_text to user_test_answers if missing
-        try:
-            db.execute("""
-            ALTER TABLE user_test_answers
-            ADD COLUMN answer_text TEXT;
-            """)
-            print("✓ Added answer_text column to user_test_answers")
-        except Exception as e:
-            print(f"answer_text column already exists or error: {e}")
+    def create_indexes(self):
+        """Create indexes for query performance"""
+        indexes = [
+            "CREATE INDEX IF NOT EXISTS idx_students_admin ON students(admin_id)",
+            "CREATE INDEX IF NOT EXISTS idx_documents_admin ON documents(admin_id)",
+            "CREATE INDEX IF NOT EXISTS idx_chunks_doc ON document_chunks(document_id)",
+            "CREATE INDEX IF NOT EXISTS idx_sessions_student ON test_sessions(student_id, topic)",
+            "CREATE INDEX IF NOT EXISTS idx_results_student ON test_results(student_id, topic)",
+            "CREATE INDEX IF NOT EXISTS idx_emotions_session ON test_emotions(session_id)",
+            "CREATE INDEX IF NOT EXISTS idx_answers_session ON user_test_answers(session_id)",
+            "CREATE INDEX IF NOT EXISTS idx_memory_student ON learning_memory(student_id, topic)",
+        ]
 
-        # Add source_url to documents if missing
-        try:
-            db.execute("""            ALTER TABLE user_test_answers
-            ADD COLUMN answer_text TEXT;
-            """)
-            print("✓ Added answer_text column to user_test_answers")
-        except Exception as e:
-            print(f"answer_text column already exists or error: {e}")
+        for idx_sql in indexes:
+            try:
+                db.execute(idx_sql)
+            except Exception as e:
+                logger.debug(f"Index creation: {e}")
 
-        # Add admin_id to documents if missing
-        try:
-            db.execute("""
-            ALTER TABLE documents
-            ADD COLUMN admin_id UUID REFERENCES admins(id) ON DELETE CASCADE;
-            """)
-            print("✓ Added admin_id column to documents")
-        except Exception as e:
-            print(f"admin_id column already exists or error: {e}")
+        logger.info("✓ Indexes created")
 
-        # Add source_url to documents if missing
+    def setup_all(self):
+        """Run complete database setup"""
         try:
-            db.execute("""            ALTER TABLE documents
-            ADD COLUMN source_url TEXT;
-            """)
-            print("✓ Added source_url column to documents")
+            logger.info("🔧 Starting database setup...")
+            self.create_extensions()
+            self.create_tables()
+            self.create_similarity_function()
+            self.migrate_add_missing_columns()
+            self.create_indexes()
+            logger.info("✅ Database setup completed successfully!")
+            return True
         except Exception as e:
-            print(f"source_url column already exists or error: {e}")
-
-        # Add question_type to test_questions if missing
-        try:
-            db.execute("""
-            ALTER TABLE test_questions
-            ADD COLUMN question_type TEXT DEFAULT 'mcq';
-            """)
-            print("✓ Added question_type column to test_questions")
-        except Exception as e:
-            print(f"question_type column already exists or error: {e}")
-
-        # Add evaluation_result to user_test_answers if missing
-        try:
-            db.execute("""
-            ALTER TABLE user_test_answers
-            ADD COLUMN evaluation_result TEXT;
-            """)
-            print("✓ Added evaluation_result column to user_test_answers")
-        except Exception as e:
-            print(f"evaluation_result column already exists or error: {e}")
+            logger.error(f"❌ Database setup failed: {e}")
+            raise
 
 
 if __name__ == "__main__":
-
     setup = DatabaseSetup()
-
-    setup.create_extensions()
-    setup.create_tables()
-    setup.create_similarity_function()
-    setup.migrate_add_missing_columns()
-
-    print("Database setup completed.")
+    setup.setup_all()
+    print("✅ Database initialization complete")

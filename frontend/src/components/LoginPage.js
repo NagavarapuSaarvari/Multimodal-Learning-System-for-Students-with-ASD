@@ -162,13 +162,6 @@ function LoginPage({ onLoginSuccess }) {
                 </div>
               )}
 
-              {/* Info Box */}
-              <div className="mb-6 p-4 bg-blue-50 border border-blue-200 rounded-lg">
-                <p className="text-blue-900 text-sm font-medium">
-                  Admins can manage multiple students and track their personalized learning progress.
-                </p>
-              </div>
-
               {/* Google Sign-In Button */}
               <div className="mb-6">
                 {loading ? (

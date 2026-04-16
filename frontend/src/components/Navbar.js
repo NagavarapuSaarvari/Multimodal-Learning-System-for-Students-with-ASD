@@ -134,7 +134,6 @@ function Navbar({ user, selectedStudent, onLogout }) {
                     title="Logout"
                   >
                     <LogOut size={18} />
-                    Logout
                   </button>
                 </div>
               </>

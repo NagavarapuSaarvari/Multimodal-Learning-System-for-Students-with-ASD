@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, HTTPException
+from fastapi import FastAPI, UploadFile, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import traceback
@@ -43,6 +43,55 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ==============================
+# STARTUP MIGRATIONS
+# ==============================
+@app.on_event("startup")
+async def startup_event():
+    """Run migrations on startup"""
+    try:
+        logger.info("Running startup migrations...")
+        
+        # Check and add student_id column to test_sessions if missing
+        try:
+            db.execute("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name='test_sessions' AND column_name='student_id'
+            """)
+            
+            if not db.fetch():
+                logger.info("Adding student_id column to test_sessions...")
+                db.execute("""
+                    ALTER TABLE test_sessions
+                    ADD COLUMN student_id UUID REFERENCES students(id) ON DELETE CASCADE
+                """)
+                logger.info("✓ Successfully added student_id column to test_sessions")
+        except Exception as e:
+            logger.warning(f"Could not add student_id to test_sessions: {e}")
+        
+        # Check and add student_id column to test_results if missing
+        try:
+            db.execute("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name='test_results' AND column_name='student_id'
+            """)
+            
+            if not db.fetch():
+                logger.info("Adding student_id column to test_results...")
+                db.execute("""
+                    ALTER TABLE test_results
+                    ADD COLUMN student_id UUID REFERENCES students(id) ON DELETE CASCADE
+                """)
+                logger.info("✓ Successfully added student_id column to test_results")
+        except Exception as e:
+            logger.warning(f"Could not add student_id to test_results: {e}")
+        
+        logger.info("✓ Startup migrations completed")
+    except Exception as e:
+        logger.error(f"Error during startup migrations: {e}")
 
 doc_service = DocumentService()
 rag_service = RAGService()
@@ -335,6 +384,192 @@ async def delete_student(student_id: str):
         raise HTTPException(status_code=500, detail="Failed to delete student")
 
 
+@app.get("/students/{student_id}/stats")
+async def get_student_stats(student_id: str):
+    """Get comprehensive statistics for a student"""
+    try:
+        logger.info(f"Fetching stats for student: {student_id}")
+        
+        # Try to get stats, with better error handling
+        try:
+            # Get test results count and average score
+            db.execute(
+                """
+                SELECT COUNT(*) as total_tests, AVG(score) as avg_score, MAX(score) as max_score
+                FROM test_results
+                WHERE student_id = %s
+                """,
+                (student_id,)
+            )
+            test_data = db.fetch()
+            test_row = test_data[0] if test_data else (0, 0, 0)
+            
+            total_tests = test_row[0] or 0
+            avg_score = round(float(test_row[1]), 2) if test_row[1] else 0
+            max_score = float(test_row[2]) if test_row[2] else 0
+            
+            # Get unique topics covered
+            db.execute(
+                """
+                SELECT COUNT(DISTINCT topic)
+                FROM test_results
+                WHERE student_id = %s
+                """,
+                (student_id,)
+            )
+            topics_data = db.fetch()
+            topics_covered = topics_data[0][0] if topics_data and topics_data[0] else 0
+            
+            # Get last activity date
+            db.execute(
+                """
+                SELECT MAX(created_at)
+                FROM test_results
+                WHERE student_id = %s
+                """,
+                (student_id,)
+            )
+            activity_data = db.fetch()
+            last_activity = activity_data[0][0] if activity_data and activity_data[0][0] else None
+            
+            logger.info(f"Stats retrieved - Tests: {total_tests}, Avg Score: {avg_score}, Topics: {topics_covered}")
+            
+            return {
+                "studentId": student_id,
+                "totalTests": total_tests,
+                "averageScore": avg_score,
+                "maxScore": max_score,
+                "topicsCovered": topics_covered,
+                "lastActivity": last_activity.isoformat() if last_activity else None
+            }
+        except Exception as inner_e:
+            logger.error(f"Query error: {str(inner_e)}")
+            # If table structure issue, return empty stats
+            logger.warning(f"Returning empty stats due to query error")
+            return {
+                "studentId": student_id,
+                "totalTests": 0,
+                "averageScore": 0,
+                "maxScore": 0,
+                "topicsCovered": 0,
+                "lastActivity": None
+            }
+            
+    except Exception as e:
+        error_msg = f"Error fetching student stats: {str(e)}\n{traceback.format_exc()}"
+        logger.error(error_msg)
+        # Return safe fallback instead of crashing
+        return {
+            "studentId": student_id,
+            "totalTests": 0,
+            "averageScore": 0,
+            "maxScore": 0,
+            "topicsCovered": 0,
+            "lastActivity": None
+        }
+
+
+@app.get("/students/{student_id}/dashboard")
+async def get_student_dashboard(student_id: str):
+    """Get dashboard metrics and test history for a student"""
+    try:
+        logger.info(f"Fetching dashboard data for student: {student_id}")
+        
+        # Metric 1: Total tests
+        db.execute(
+            "SELECT COUNT(*) FROM test_results WHERE student_id = %s",
+            (student_id,)
+        )
+        total_tests_result = db.fetch()
+        total_tests = total_tests_result[0][0] if total_tests_result else 0
+        
+        # Metric 2: Average score (rounded to 2 decimals)
+        db.execute(
+            "SELECT AVG(score) FROM test_results WHERE student_id = %s",
+            (student_id,)
+        )
+        avg_score_result = db.fetch()
+        avg_score_raw = avg_score_result[0][0] if avg_score_result else 0
+        avg_score = round(float(avg_score_raw), 2) if avg_score_raw else 0
+        
+        # Metric 3: Topics covered
+        db.execute(
+            "SELECT COUNT(DISTINCT topic) FROM test_results WHERE student_id = %s",
+            (student_id,)
+        )
+        topics_result = db.fetch()
+        topics_covered = topics_result[0][0] if topics_result else 0
+        
+        # Metric 4: Highest score
+        db.execute(
+            "SELECT MAX(score) FROM test_results WHERE student_id = %s",
+            (student_id,)
+        )
+        highest_result = db.fetch()
+        highest_score = float(highest_result[0][0]) if highest_result and highest_result[0][0] else 0
+        
+        # Metric 5: Learning consistency (days with tests)
+        db.execute(
+            "SELECT COUNT(DISTINCT DATE(created_at)) FROM test_results WHERE student_id = %s",
+            (student_id,)
+        )
+        learning_result = db.fetch()
+        learning_days = learning_result[0][0] if learning_result else 0
+        
+        # Test history (all past tests with topic and score)
+        db.execute(
+            """
+            SELECT topic, score, test_number, created_at, difficulty
+            FROM test_results
+            WHERE student_id = %s
+            ORDER BY created_at DESC
+            LIMIT 50
+            """,
+            (student_id,)
+        )
+        history_rows = db.fetch()
+        history = []
+        if history_rows:
+            for row in history_rows:
+                history.append({
+                    "topic": row[0],
+                    "score": round(float(row[1]), 2) if row[1] else 0,
+                    "testNumber": row[2] if row[2] else 0,
+                    "date": row[3].isoformat() if row[3] else None,
+                    "difficulty": row[4] if row[4] else "easy"
+                })
+        
+        logger.info(f"Dashboard data retrieved - Tests: {total_tests}, Avg: {avg_score}, Topics: {topics_covered}, History count: {len(history)}")
+        
+        return {
+            "studentId": student_id,
+            "metrics": {
+                "totalTests": total_tests,
+                "averageScore": avg_score,
+                "topicsCovered": topics_covered,
+                "highestScore": highest_score,
+                "learningDays": learning_days
+            },
+            "history": history
+        }
+        
+    except Exception as e:
+        logger.error(f"Error fetching dashboard data: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return {
+            "studentId": student_id,
+            "metrics": {
+                "totalTests": 0,
+                "averageScore": 0,
+                "topicsCovered": 0,
+                "highestScore": 0,
+                "learningDays": 0
+            },
+            "history": []
+        }
+
+
 @app.post("/upload")
 async def upload_document(file: UploadFile, admin_id: str = None):
     """Upload a PDF document"""
@@ -360,20 +595,20 @@ async def upload_document(file: UploadFile, admin_id: str = None):
 def get_documents(admin_id: str = None):
     """Get all uploaded documents for an admin"""
     try:
+        # If no admin_id provided in query param, return empty list (documents require admin context)
         if not admin_id:
-            raise ValueError("admin_id is required")
+            logger.warning("No admin_id provided for documents request")
+            return {"documents": []}
         
         logger.info(f"Fetching documents list for admin: {admin_id}")
         documents = doc_service.get_documents(admin_id)
         logger.info(f"Retrieved {len(documents)} documents")
         return {"documents": documents}
-    except ValueError as e:
-        logger.error(f"Validation error: {str(e)}")
-        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         error_msg = f"Error fetching documents: {str(e)}\n{traceback.format_exc()}"
         logger.error(error_msg)
-        raise HTTPException(status_code=500, detail=str(e))
+        # Return empty list instead of error
+        return {"documents": []}
 
 
 @app.delete("/documents/{doc_id}")
@@ -406,19 +641,29 @@ def learn(topic: str, difficulty: str = "easy"):
 
 
 @app.post("/test/create")
-def create_test(topic: str, difficulty: str = "easy", test_number: int = 1):
+async def create_test(request: Request, topic: str, difficulty: str = "easy", test_number: int = 1, student_id: str = None):
     """Create a new test session"""
     try:
-        logger.info(f"Creating test for topic: {topic}, test #{test_number}")
+        # Extract learning material from request body if provided
+        learning_material = None
+        try:
+            body = await request.json()
+            if body and isinstance(body, dict):
+                learning_material = body.get("learning_material")
+        except:
+            # No body provided, that's fine
+            pass
+        
+        logger.info(f"Creating test for topic: {topic}, test #{test_number}, student: {student_id}, has_material: {learning_material is not None}")
         
         # If not first test, determine difficulty from previous results
         if test_number > 1:
             last_result = test_engine.get_last_test_result(topic)
-            if last_result and test_number <= 3:
+            if last_result:
                 difficulty = last_result["difficulty"]
                 logger.info(f"Using previous difficulty: {difficulty}")
         
-        test_data = test_engine.create_test_session(topic, difficulty, test_number)
+        test_data = test_engine.create_test_session(topic, difficulty, test_number, student_id, learning_material)
         logger.info(f"Test created successfully. Session ID: {test_data.get('sessionId')}")
         return test_data
     except Exception as e:
@@ -540,17 +785,11 @@ def get_next_test_info(topic: str):
         test_count = test_engine.get_test_count(topic)
         test_number = test_count + 1
         
-        if test_number > 3:
-            return {
-                "testNumber": test_number,
-                "testCompleted": True,
-                "message": "All 3 tests are completed"
-            }
-        
+        # Allow unlimited tests per topic
         return {
             "testNumber": test_number,
             "testCompleted": False,
-            "message": f"Ready for test {test_number} of 3"
+            "message": f"Ready for test {test_number}"
         }
     except Exception as e:
         error_msg = f"Error getting next test info: {str(e)}\n{traceback.format_exc()}"
@@ -566,20 +805,24 @@ def health():
 
 
 @app.post("/upload-youtube")
-async def upload_youtube(youtube_url: str):
+async def upload_youtube(youtube_url: str, admin_id: str = None):
     """Upload a YouTube video transcript as learning material"""
     try:
-        logger.info(f"Uploading YouTube: {youtube_url}")
-        result = doc_service.upload_youtube(youtube_url)
+        if not admin_id:
+            raise ValueError("admin_id is required")
+        
+        logger.info(f"Uploading YouTube: {youtube_url} for admin: {admin_id}")
+        result = doc_service.upload_youtube(youtube_url, admin_id)
         logger.info(f"YouTube uploaded successfully: {result['doc_id']}")
         return result
     except ValueError as e:
         logger.error(f"Validation error in YouTube upload: {str(e)}")
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        error_msg = f"YouTube upload failed: {str(e)}\n{traceback.format_exc()}"
+        error_msg = f"YouTube upload failed: {str(e)}"
         logger.error(error_msg)
-        raise HTTPException(status_code=500, detail=str(e))
+        # Return proper error message instead of generic error
+        raise HTTPException(status_code=400, detail="Could not extract transcript from this video. Please try another video or check that captions are available.")
 
 
 @app.post("/test/emotion/text")

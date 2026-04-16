@@ -160,14 +160,24 @@ export const getTestScore = async (testSessionId) => {
   }
 };
 
-export const createTestWithNumber = async (topic, difficulty = "easy", testNumber = 1) => {
+export const createTestWithNumber = async (topic, difficulty = "easy", testNumber = 1, studentId = null, learningMaterial = null) => {
   try {
-    const response = await fetch(
-      `${API_BASE}/test/create?topic=${encodeURIComponent(topic)}&difficulty=${difficulty}&test_number=${testNumber}`,
-      {
-        method: "POST",
-      }
-    );
+    let url = `${API_BASE}/test/create?topic=${encodeURIComponent(topic)}&difficulty=${difficulty}&test_number=${testNumber}`;
+    if (studentId) {
+      url += `&student_id=${encodeURIComponent(studentId)}`;
+    }
+    
+    // Prepare request body with optional learning material
+    const body = {};
+    if (learningMaterial) {
+      body.learning_material = learningMaterial;
+    }
+    
+    const response = await fetch(url, {
+      method: "POST",
+      headers: body.learning_material ? { "Content-Type": "application/json" } : {},
+      body: body.learning_material ? JSON.stringify(body) : undefined,
+    });
     
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({ detail: "Unknown error" }));
@@ -321,5 +331,70 @@ export const submitTextAnswer = async (testSessionId, questionIndex, answerText)
   } catch (error) {
     console.error("submitTextAnswer error:", error);
     throw error;
+  }
+};
+
+// Student Statistics
+export const getStudentStats = async (studentId) => {
+  try {
+    const response = await fetch(
+      `${API_BASE}/students/${studentId}/stats`,
+      {
+        headers: {
+          Authorization: `Bearer ${localStorage.getItem("accessToken")}`,
+        },
+      }
+    );
+    
+    if (!response.ok) {
+      console.warn("Failed to fetch student stats");
+      return null;
+    }
+    
+    return await response.json();
+  } catch (error) {
+    console.warn("getStudentStats error:", error);
+    return null;
+  }
+};
+
+export const fetchStudentDashboard = async (studentId) => {
+  try {
+    const response = await fetch(
+      `${API_BASE}/students/${studentId}/dashboard`,
+      {
+        headers: {
+          Authorization: `Bearer ${localStorage.getItem("accessToken")}`,
+        },
+      }
+    );
+    
+    if (!response.ok) {
+      console.warn("Failed to fetch student dashboard");
+      return {
+        metrics: {
+          totalTests: 0,
+          averageScore: 0,
+          topicsCovered: 0,
+          highestScore: 0,
+          learningDays: 0
+        },
+        history: []
+      };
+    }
+    
+    return await response.json();
+  } catch (error) {
+    console.warn("fetchStudentDashboard error:", error);
+    return {
+      metrics: {
+        totalTests: 0,
+        averageScore: 0,
+        topicsCovered: 0,
+        highestScore: 0,
+        learningDays: 0
+      },
+      history: []
+    };
   }
 };

@@ -71,7 +71,7 @@ function SourceDocuments({ topic }) {
 
               <div className="flex-1 min-w-0">
                 <p className="font-semibold text-gray-900 text-sm truncate">
-                  {doc.filename}
+                  {doc.file_type === "youtube" ? (doc.youtube_title || doc.filename) : doc.filename}
                 </p>
                 <p className="text-xs text-gray-600 mt-1">
                   {doc.file_type === "youtube" ? "📺 YouTube Video" : "📄 PDF Document"}

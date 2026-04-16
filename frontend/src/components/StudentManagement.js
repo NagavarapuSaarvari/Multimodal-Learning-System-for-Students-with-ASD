@@ -309,10 +309,6 @@ function StudentManagement({ adminId, onStudentAdded }) {
                     {new Date(student.date_of_birth).toLocaleDateString()}
                   </div>
                   <div>
-                    <span className="font-medium">Age:</span>{" "}
-                    {calculateAge(student.date_of_birth)} years
-                  </div>
-                  <div>
                     <span className="font-medium">Added:</span>{" "}
                     {new Date(student.created_at).toLocaleDateString()}
                   </div>

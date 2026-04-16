@@ -1,23 +1,48 @@
 import React, { useState, useRef, useEffect } from "react"
 import { createTestWithNumber, submitAnswer, getTestScore, evaluateTextAnswer } from "../services/api"
-import { CheckCircle, XCircle } from "lucide-react"
+import { CheckCircle, XCircle, ArrowLeft, ArrowRight } from "lucide-react"
+import EmotionCapture from "./EmotionCapture"
 
-function TestPanel({ topic, testNumber = 1, onTestComplete, onStartTest }) {
+function TestPanel({ topic, testNumber = 1, studentId, onTestComplete, onStartTest, learningMaterial = null }) {
 
   const [testSessionId, setTestSessionId] = useState(null)
   const [questions, setQuestions] = useState([])
   const [currentIndex, setCurrentIndex] = useState(0)
   const [answers, setAnswers] = useState({})
   const [feedback, setFeedback] = useState({})
-  const [loading, setLoading] = useState(false)
+  const [loading, setLoading] = useState(true)
   const [started, setStarted] = useState(false)
+  const [testFinished, setTestFinished] = useState(false)
+  const [testResults, setTestResults] = useState(null)
   const [textAnswer, setTextAnswer] = useState("")
   const [evaluating, setEvaluating] = useState(false)
   const textInputRef = useRef(null)
 
+  // Start test automatically on mount
+  useEffect(() => {
+    const startTestAutomatically = async () => {
+      try {
+        setLoading(true)
+        // Test 1 = easy, Test 2+ = medium
+        const difficulty = testNumber === 1 ? "easy" : "medium"
+        const data = await createTestWithNumber(topic, difficulty, testNumber, studentId, learningMaterial)
+        setTestSessionId(data.sessionId)
+        setQuestions(data.questions)
+        setStarted(true)
+        setCurrentIndex(0)
+        if (onStartTest) onStartTest(data.sessionId)
+      } catch (error) {
+        console.error("Error starting test:", error)
+      } finally {
+        setLoading(false)
+      }
+    }
+    startTestAutomatically()
+  }, [])
+
   const startTest = async () => {
     setLoading(true)
-    const data = await createTestWithNumber(topic, "easy", testNumber)
+    const data = await createTestWithNumber(topic, "easy", testNumber, studentId)
 
     setTestSessionId(data.sessionId)
     setQuestions(data.questions)
@@ -95,27 +120,92 @@ function TestPanel({ topic, testNumber = 1, onTestComplete, onStartTest }) {
 
   const finish = async () => {
     const res = await getTestScore(testSessionId)
-    onTestComplete(res)
+    // Round average score to 2 decimal places
+    if (res.averageScore) {
+      res.averageScore = Math.round(res.averageScore * 100) / 100
+    }
+    setTestResults(res)
+    setTestFinished(true)
   }
 
-  // START SCREEN
-  if (!started) {
+  const handleBackButton = () => {
+    onTestComplete(testResults, 'back')
+  }
+
+  const handleContinueButton = () => {
+    onTestComplete(testResults, 'continue')
+  }
+
+  // Show loading while test is starting
+  if (loading || !started || questions.length === 0) {
     return (
-      <div className="text-center mt-20">
-        <h2 className="text-2xl font-bold text-blue-600 mb-4">
-          Ready to Test Your Knowledge?
-        </h2>
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
+          <p className="text-gray-600 font-medium">Loading test...</p>
+        </div>
+      </div>
+    )
+  }
 
-        <p className="mb-6">
-          Topic: <b>{topic}</b>
-        </p>
+  // TEST FINISHED - SHOW BACK/CONTINUE BUTTONS
+  if (testFinished && testResults) {
+    const correctCount = testResults?.correct || 0
+    const totalCount = testResults?.total || 0
+    const accuracy = totalCount > 0 ? Math.round((correctCount / totalCount) * 100) : 0
 
-        <button
-          onClick={startTest}
-          className="bg-blue-600 text-white px-6 py-2 rounded-lg"
-        >
-          {loading ? "Starting..." : "Start Test"}
-        </button>
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-purple-50 py-12 px-4">
+        <div className="max-w-2xl mx-auto">
+          {/* Score Display */}
+          <div className="bg-white rounded-2xl shadow-2xl p-8 mb-8">
+            <div className="text-center mb-6">
+              <div className="inline-block bg-gradient-to-r from-blue-600 to-purple-600 text-white px-6 py-2 rounded-full mb-4">
+                Test {testNumber} Complete
+              </div>
+              <h1 className="text-5xl font-bold text-gray-900 mb-2">
+                {accuracy}%
+              </h1>
+              <p className="text-xl text-gray-600">
+                You got {correctCount} out of {totalCount} questions correct
+              </p>
+            </div>
+
+            {/* Performance Metrics */}
+            <div className="grid grid-cols-3 gap-4 mb-8">
+              <div className="bg-green-50 rounded-lg p-4 text-center">
+                <p className="text-2xl font-bold text-green-600 mb-1">{correctCount}</p>
+                <p className="text-sm text-green-700 font-semibold">Correct</p>
+              </div>
+              <div className="bg-red-50 rounded-lg p-4 text-center">
+                <p className="text-2xl font-bold text-red-600 mb-1">{totalCount - correctCount}</p>
+                <p className="text-sm text-red-700 font-semibold">Incorrect</p>
+              </div>
+              <div className="bg-blue-50 rounded-lg p-4 text-center">
+                <p className="text-2xl font-bold text-blue-600 mb-1">{accuracy}%</p>
+                <p className="text-sm text-blue-700 font-semibold">Accuracy</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Action Buttons */}
+          <div className="flex gap-4">
+            <button
+              onClick={handleBackButton}
+              className="flex-1 bg-gray-600 hover:bg-gray-700 text-white font-semibold py-4 rounded-lg transition-colors flex items-center justify-center gap-2 shadow-lg"
+            >
+              <ArrowLeft size={20} />
+              Back to Dashboard
+            </button>
+            <button
+              onClick={handleContinueButton}
+              className="flex-1 bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white font-semibold py-4 rounded-lg transition-colors flex items-center justify-center gap-2 shadow-lg"
+            >
+              Continue
+              <ArrowRight size={20} />
+            </button>
+          </div>
+        </div>
       </div>
     )
   }
@@ -129,7 +219,9 @@ function TestPanel({ topic, testNumber = 1, onTestComplete, onStartTest }) {
   // TEXT QUESTION
   if (isTextQuestion) {
     return (
-      <div className="max-w-3xl mx-auto mt-10 p-6 bg-white rounded-lg shadow">
+      <div>
+        <EmotionCapture sessionId={testSessionId} isTestActive={started} />
+        <div className="max-w-3xl mx-auto mt-10 p-6 bg-white rounded-lg shadow">
         <div className="mb-4">
           <h3 className="mb-4 font-semibold text-lg">
             Question {currentIndex + 1} of {questions.length}
@@ -151,11 +243,15 @@ function TestPanel({ topic, testNumber = 1, onTestComplete, onStartTest }) {
             <textarea
               ref={textInputRef}
               value={textAnswer}
-              onChange={(e) => setTextAnswer(e.target.value)}
+              onChange={(e) => {
+                // Limit to one short line: 150 characters
+                const text = e.target.value.slice(0, 150);
+                setTextAnswer(text);
+              }}
               onKeyDown={handleKeyDown}
-              placeholder="Type your answer here... (Use Ctrl+Enter or Cmd+Enter to submit)"
+              placeholder="Type a short answer (max 150 characters)..."
               className="w-full p-4 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-blue-500 transition-colors"
-              rows="6"
+              rows="2"
               disabled={evaluating}
               autoFocus
             />
@@ -179,7 +275,7 @@ function TestPanel({ topic, testNumber = 1, onTestComplete, onStartTest }) {
             </div>
 
             <p className="mt-2 text-xs text-gray-500">
-              💡 Tip: Press Ctrl+Enter (or Cmd+Enter on Mac) to submit your answer
+              {textAnswer.length}/150 characters | Press Ctrl+Enter to submit
             </p>
           </div>
         ) : (
@@ -219,13 +315,16 @@ function TestPanel({ topic, testNumber = 1, onTestComplete, onStartTest }) {
             </button>
           </div>
         )}
+        </div>
       </div>
     )
   }
 
   // MCQ QUESTION
   return (
-    <div className="max-w-3xl mx-auto mt-10 p-6 bg-white rounded-lg shadow">
+    <div>
+      <EmotionCapture sessionId={testSessionId} isTestActive={started} />
+      <div className="max-w-3xl mx-auto mt-10 p-6 bg-white rounded-lg shadow">
       <div className="mb-6">
         <h3 className="mb-4 font-semibold text-lg">
           Question {currentIndex + 1} of {questions.length}
@@ -272,6 +371,7 @@ function TestPanel({ topic, testNumber = 1, onTestComplete, onStartTest }) {
           </button>
         </div>
       )}
+      </div>
     </div>
   )
 }

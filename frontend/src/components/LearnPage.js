@@ -23,6 +23,15 @@ function LearnPage() {
   const [selectedStudent, setSelectedStudent] = useState(null)
   const navigate = useNavigate()
 
+  // Update page title when topic changes
+  useEffect(() => {
+    if (topic) {
+      document.title = `${topic} - Learning Material`
+    } else {
+      document.title = "Learning Module"
+    }
+  }, [topic])
+
   useEffect(() => {
     // Check if student is selected
     const student = JSON.parse(localStorage.getItem("selectedStudent") || "null")
@@ -67,15 +76,51 @@ function LearnPage() {
     setTestStarted(true)
   }
 
-  const handleTestComplete = (results) => {
+  const handleTestComplete = (results, action = 'continue') => {
     setTestResults(results)
     setTestCompleted(true)
     setTestStarted(false)
+
+    // Handle action
+    if (action === 'back') {
+      // Go back to dashboard immediately
+      setTimeout(() => {
+        navigate("/dashboard")
+      }, 500)
+      return
+    }
+
+    // 'continue' action: prepare next test or regenerate material
+    if (action === 'continue') {
+      if (testNumber === 1) {
+        // After test 1, generate material with medium difficulty and show test 2
+        resetForNextTest()
+      } else {
+        // After test 2+, go back to topic input
+        resetAll()
+      }
+    }
   }
 
-  const resetForNextTest = () => {
+  const resetForNextTest = async () => {
     setTestCompleted(false)
     setTestResults(null)
+
+    // Move to test 2 with medium difficulty
+    setTestNumber(2)
+    
+    // Regenerate material for test 2 (slightly higher difficulty)
+    try {
+      setLoadingMaterial(true)
+      const data = await generateLearningMaterial(topic, "medium")
+      setMaterial(data.material)
+      // Auto-start test 2 after showing material
+      setTimeout(() => setTestStarted(true), 1000)
+    } catch (err) {
+      setError("Failed to prepare for test 2: " + err.message)
+    } finally {
+      setLoadingMaterial(false)
+    }
   }
 
   const resetAll = () => {
@@ -94,6 +139,8 @@ function LearnPage() {
       <TestPanel
         topic={topic}
         testNumber={testNumber}
+        studentId={selectedStudent?.id}
+        learningMaterial={material}
         onTestComplete={handleTestComplete}
         onStartTest={handleStartTest}
       />
@@ -102,7 +149,7 @@ function LearnPage() {
 
   return (
     <div className="min-h-screen bg-white">
-      <EmotionCapture sessionId={testSessionId} isTestActive={testStarted} />
+      {!testStarted && <EmotionCapture sessionId={testSessionId} isTestActive={false} />}
 
       <div className="w-full">
         {/* Error */}
@@ -310,7 +357,7 @@ function LearnPage() {
                   className="bg-gradient-to-r from-blue-600 to-blue-700 text-white px-8 sm:px-12 py-3 sm:py-4 rounded-lg hover:from-blue-700 hover:to-blue-800 font-semibold text-base sm:text-lg transition-all shadow-lg hover:shadow-xl flex items-center gap-2 mx-auto mb-3"
                 >
                   <BookOpen size={20} />
-                  Start Test {testNumber}/3
+                  Start Test
                 </button>
                 <p className="text-gray-500 text-sm">Ready to test your knowledge? Click above to begin.</p>
               </div>
@@ -318,43 +365,7 @@ function LearnPage() {
           </div>
         )}
 
-        {/* RESULTS */}
-        {testCompleted && testResults && (
-          <div className="flex items-center justify-center min-h-screen px-4">
-            <div className="bg-white p-12 rounded-2xl shadow-2xl text-center max-w-2xl">
-              <div className={`w-16 h-16 rounded-full mx-auto mb-6 flex items-center justify-center ${
-                testResults.score >= 70 ? "bg-green-100" : "bg-blue-100"
-              }`}>
-                <span className={`text-3xl font-bold ${
-                  testResults.score >= 70 ? "text-green-600" : "text-blue-600"
-                }`}>{testResults.score}%</span>
-              </div>
-              
-              <h2 className="text-3xl font-bold text-gray-900 mb-2">
-                Test {testNumber} Complete!
-              </h2>
-              <p className="text-lg text-gray-600 mb-8">
-                You answered {testResults.correctAnswers} out of {testResults.totalQuestions} questions correctly
-              </p>
-
-              {testNumber < 3 ? (
-                <button
-                  onClick={resetForNextTest}
-                  className="bg-blue-600 text-white px-8 py-3 rounded-lg hover:bg-blue-700 font-semibold"
-                >
-                  Continue to Test {testNumber + 1}
-                </button>
-              ) : (
-                <button
-                  onClick={resetAll}
-                  className="bg-green-600 text-white px-8 py-3 rounded-lg hover:bg-green-700 font-semibold"
-                >
-                  All Tests Complete! 🎉
-                </button>
-              )}
-            </div>
-          </div>
-        )}
+        {/* Test results are now handled in TestPanel with Back/Continue buttons */}
       </div>
     </div>
   )
