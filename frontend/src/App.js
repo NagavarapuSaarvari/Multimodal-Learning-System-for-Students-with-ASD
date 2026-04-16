@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react"
-import { BrowserRouter as Router, Routes, Route, Navigate } from "react-router-dom"
+import { BrowserRouter as Router, Routes, Route, Navigate, useNavigate } from "react-router-dom"
 import { Toaster } from "react-hot-toast"
 import Navbar from "./components/Navbar"
 import DocumentUpload from "./components/DocumentUpload"
@@ -32,6 +32,13 @@ function App() {
         }
       } catch (error) {
         console.error("Error parsing stored user:", error)
+        localStorage.removeItem("user")
+        localStorage.removeItem("accessToken")
+        localStorage.removeItem("adminId")
+      }
+    } else {
+      // If page is refreshed without auth, ensure we redirect to login
+      if (!storedUser || !token) {
         localStorage.removeItem("user")
         localStorage.removeItem("accessToken")
         localStorage.removeItem("adminId")

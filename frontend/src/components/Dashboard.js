@@ -131,7 +131,6 @@ function Dashboard({ user }) {
                   <tr className="border-b border-gray-200">
                     <th className="text-left py-3 px-4 font-semibold text-gray-700">Topic</th>
                     <th className="text-left py-3 px-4 font-semibold text-gray-700">Score</th>
-                    <th className="text-left py-3 px-4 font-semibold text-gray-700">Test #</th>
                     <th className="text-left py-3 px-4 font-semibold text-gray-700">Difficulty</th>
                     <th className="text-left py-3 px-4 font-semibold text-gray-700">Date</th>
                   </tr>
@@ -153,7 +152,6 @@ function Dashboard({ user }) {
                           {test.score}%
                         </span>
                       </td>
-                      <td className="py-3 px-4 text-gray-700">Test {test.testNumber}</td>
                       <td className="py-3 px-4 text-gray-700 capitalize">{test.difficulty}</td>
                       <td className="py-3 px-4 text-gray-500 text-sm">
                         {test.date ? new Date(test.date).toLocaleDateString() : "N/A"}

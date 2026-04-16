@@ -298,13 +298,16 @@ function AdminDashboard({ adminId, onSelectStudent }) {
                         <p className="text-gray-600 text-sm font-medium">Last Active</p>
                         <p className="text-sm font-bold text-gray-900 mt-2">
                           {studentStats[selectedStudent.id]?.lastActivity
-                            ? Math.floor(
-                                (Date.now() -
-                                  new Date(
-                                    studentStats[selectedStudent.id].lastActivity
-                                  ).getTime()) /
-                                  (1000 * 60 * 60 * 24)
-                              ) + " days ago"
+                            ? (() => {
+                                const daysDiff = Math.floor(
+                                  (Date.now() -
+                                    new Date(
+                                      studentStats[selectedStudent.id].lastActivity
+                                    ).getTime()) /
+                                    (1000 * 60 * 60 * 24)
+                                );
+                                return daysDiff === 0 ? "Today" : daysDiff + " day" + (daysDiff > 1 ? "s" : "") + " ago";
+                              })()
                             : "No activity"}
                         </p>
                       </div>
@@ -325,7 +328,6 @@ function AdminDashboard({ adminId, onSelectStudent }) {
                             <tr className="border-b border-gray-200">
                               <th className="text-left py-3 px-4 font-semibold text-gray-700">Topic</th>
                               <th className="text-left py-3 px-4 font-semibold text-gray-700">Score</th>
-                              <th className="text-left py-3 px-4 font-semibold text-gray-700">Test #</th>
                               <th className="text-left py-3 px-4 font-semibold text-gray-700">Difficulty</th>
                               <th className="text-left py-3 px-4 font-semibold text-gray-700">Date</th>
                             </tr>
@@ -343,7 +345,6 @@ function AdminDashboard({ adminId, onSelectStudent }) {
                                     {test.score}%
                                   </span>
                                 </td>
-                                <td className="py-3 px-4 text-gray-600">Test {test.testNumber}</td>
                                 <td className="py-3 px-4 text-gray-600 capitalize">{test.difficulty}</td>
                                 <td className="py-3 px-4 text-gray-500 text-xs">
                                   {new Date(test.date).toLocaleDateString()}

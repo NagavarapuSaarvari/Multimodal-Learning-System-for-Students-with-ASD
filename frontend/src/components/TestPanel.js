@@ -113,8 +113,13 @@ function TestPanel({ topic, testNumber = 1, studentId, onTestComplete, onStartTe
     if (currentIndex < questions.length - 1) {
       setCurrentIndex(currentIndex + 1)
       setTextAnswer("")
-    } else {
-      finish()
+    }
+  }
+
+  const previous = () => {
+    if (currentIndex > 0) {
+      setCurrentIndex(currentIndex - 1)
+      setTextAnswer("")
     }
   }
 
@@ -148,7 +153,7 @@ function TestPanel({ topic, testNumber = 1, studentId, onTestComplete, onStartTe
     )
   }
 
-  // TEST FINISHED - SHOW BACK/CONTINUE BUTTONS
+  // TEST FINISHED - SHOW RESULTS AND REVIEW
   if (testFinished && testResults) {
     const correctCount = testResults?.correct || 0
     const totalCount = testResults?.total || 0
@@ -156,7 +161,7 @@ function TestPanel({ topic, testNumber = 1, studentId, onTestComplete, onStartTe
 
     return (
       <div className="min-h-screen bg-gradient-to-br from-blue-50 to-purple-50 py-12 px-4">
-        <div className="max-w-2xl mx-auto">
+        <div className="max-w-4xl mx-auto">
           {/* Score Display */}
           <div className="bg-white rounded-2xl shadow-2xl p-8 mb-8">
             <div className="text-center mb-6">
@@ -172,7 +177,7 @@ function TestPanel({ topic, testNumber = 1, studentId, onTestComplete, onStartTe
             </div>
 
             {/* Performance Metrics */}
-            <div className="grid grid-cols-3 gap-4 mb-8">
+            <div className="grid grid-cols-3 gap-4">
               <div className="bg-green-50 rounded-lg p-4 text-center">
                 <p className="text-2xl font-bold text-green-600 mb-1">{correctCount}</p>
                 <p className="text-sm text-green-700 font-semibold">Correct</p>
@@ -185,6 +190,73 @@ function TestPanel({ topic, testNumber = 1, studentId, onTestComplete, onStartTe
                 <p className="text-2xl font-bold text-blue-600 mb-1">{accuracy}%</p>
                 <p className="text-sm text-blue-700 font-semibold">Accuracy</p>
               </div>
+            </div>
+          </div>
+
+          {/* Answer Review */}
+          <div className="bg-white rounded-2xl shadow-lg p-8 mb-8">
+            <h2 className="text-2xl font-bold text-gray-900 mb-6">Answer Review</h2>
+            <div className="space-y-6">
+              {questions.map((question, qIndex) => {
+                const isAnsweredQuestion = qIndex in answers
+                const feedbackObj = feedback[qIndex]
+                const isCorrect = feedbackObj?.isCorrect
+                const questionType = question.question_type || (question.options ? 'mcq' : 'text')
+                const isTextQuestion = questionType === 'text' || !question.options
+                const userAnswerIndex = answers[qIndex]
+
+                return (
+                  <div key={qIndex} className="border-l-4 border-blue-300 bg-blue-50 p-6 rounded-lg">
+                    <div className="flex items-start justify-between mb-4">
+                      <div className="flex-1">
+                        <h3 className="font-semibold text-lg text-gray-800 mb-2">
+                          Question {qIndex + 1}: {question.question}
+                        </h3>
+                      </div>
+                      <div className="ml-4">
+                        {isCorrect ? (
+                          <div className="flex items-center gap-2 bg-green-100 text-green-700 px-3 py-1 rounded-full text-sm font-semibold">
+                            <CheckCircle size={16} />
+                            Correct
+                          </div>
+                        ) : isAnsweredQuestion && !isCorrect ? (
+                          <div className="flex items-center gap-2 bg-red-100 text-red-700 px-3 py-1 rounded-full text-sm font-semibold">
+                            <XCircle size={16} />
+                            Wrong
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-2 bg-gray-100 text-gray-700 px-3 py-1 rounded-full text-sm font-semibold">
+                            Not Answered
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {isTextQuestion ? (
+                      <div>
+                        <p className="text-gray-700 mb-2"><span className="font-semibold">Your Answer:</span> {isAnsweredQuestion ? answers[qIndex] : "Not answered"}</p>
+                        {feedbackObj && <p className="text-gray-700"><span className="font-semibold">Feedback:</span> {feedbackObj.feedback}</p>}
+                      </div>
+                    ) : (
+                      <div>
+                        <p className="text-gray-700 mb-3">
+                          <span className="font-semibold">Your Answer:</span> {isAnsweredQuestion ? `${String.fromCharCode(65 + userAnswerIndex)}. ${question.options[userAnswerIndex]}` : "Not answered"}
+                        </p>
+                        {!isCorrect && isAnsweredQuestion && feedbackObj?.correctAnswer !== undefined && (
+                          <div className="bg-green-100 border-l-4 border-green-500 p-4 rounded mt-3">
+                            <p className="text-green-800">
+                              <span className="font-semibold">Correct Answer:</span> {String.fromCharCode(65 + feedbackObj.correctAnswer)}. {question.options[feedbackObj.correctAnswer]}
+                            </p>
+                          </div>
+                        )}
+                        {feedbackObj?.explanation && (
+                          <p className="text-gray-700 mt-3"><span className="font-semibold">Explanation:</span> {feedbackObj.explanation}</p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
             </div>
           </div>
 
@@ -301,18 +373,27 @@ function TestPanel({ topic, testNumber = 1, studentId, onTestComplete, onStartTe
               <p className="text-gray-600">{feedbackData.feedback}</p>
             </div>
 
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between mb-4">
               <span className="text-sm font-medium text-gray-700">
                 Score: <span className="text-lg font-bold text-blue-600">{(feedbackData.score * 100).toFixed(0)}%</span>
               </span>
             </div>
             
-            <button
-              onClick={next}
-              className="mt-4 w-full bg-blue-600 text-white px-4 py-3 rounded-lg font-semibold hover:bg-blue-700 transition-colors"
-            >
-              {currentIndex < questions.length - 1 ? "Next Question" : "Finish Test"}
-            </button>
+            <div className="flex gap-3 mt-4">
+              <button
+                onClick={currentIndex < questions.length - 1 ? next : finish}
+                className="flex-1 bg-blue-600 text-white px-4 py-3 rounded-lg font-semibold hover:bg-blue-700 transition-colors flex items-center justify-center gap-2"
+              >
+                {currentIndex < questions.length - 1 ? (
+                  <>
+                    Next
+                    <ArrowRight size={20} />
+                  </>
+                ) : (
+                  "Submit Test"
+                )}
+              </button>
+            </div>
           </div>
         )}
         </div>
@@ -363,12 +444,29 @@ function TestPanel({ topic, testNumber = 1, studentId, onTestComplete, onStartTe
           
           <p className="text-gray-700 mb-4">{feedbackData?.explanation || ""}</p>
           
-          <button
-            onClick={next}
-            className="w-full bg-blue-600 text-white px-4 py-3 rounded-lg font-semibold hover:bg-blue-700 transition-colors"
-          >
-            {currentIndex < questions.length - 1 ? "Next Question" : "Finish Test"}
-          </button>
+          <div className="flex gap-3 mt-4">
+            <button
+              onClick={previous}
+              disabled={currentIndex === 0}
+              className="flex-1 bg-gray-400 hover:bg-gray-500 disabled:bg-gray-300 disabled:cursor-not-allowed text-white px-4 py-3 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2"
+            >
+              <ArrowLeft size={20} />
+              Previous
+            </button>
+            <button
+              onClick={currentIndex < questions.length - 1 ? next : finish}
+              className="flex-1 bg-blue-600 text-white px-4 py-3 rounded-lg font-semibold hover:bg-blue-700 transition-colors flex items-center justify-center gap-2"
+            >
+              {currentIndex < questions.length - 1 ? (
+                <>
+                  Next
+                  <ArrowRight size={20} />
+                </>
+              ) : (
+                "Submit Test"
+              )}
+            </button>
+          </div>
         </div>
       )}
       </div>
